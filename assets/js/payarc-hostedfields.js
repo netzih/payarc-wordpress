@@ -30,15 +30,20 @@
     { type: 'ZIP', key: 'zip', placeholder: 'zip', fallback: 'ZIP' }
   ];
 
+  // Sent into every iframe. PayArc's own defaults float the input at 55%
+  // width beside a 25% label column; this makes the input fill its frame.
   var DEFAULT_CSS = [
-    '.payarc-label { display: none; }',
+    'html, body, .payarc-body { margin: 0; padding: 0; background: transparent; overflow: hidden; }',
     '.payarc-all { box-sizing: border-box; }',
-    '.payarc-input { width: 100%; height: 40px; padding: 8px 10px; font-size: 16px; color: #2c3338;',
+    '.payarc-label, .payarc-label-container { display: none; }',
+    '.payarc-container, .payarc-row, .payarc-container-input, .payarc-input-container { float: none; width: 100%; margin: 0; padding: 0; background: transparent; }',
+    '.payarc-row:after { content: none; }',
+    '.payarc-input { display: block; width: 100%; height: 44px; margin: 0; padding: 0 12px; font-size: 16px; color: #2c3338;',
     '  border: 1px solid #8c8f94; border-radius: 4px; background: #fff; box-sizing: border-box; }',
-    '.payarc-input:focus { outline: 2px solid #2271b1; outline-offset: -1px; }',
+    '.payarc-input:hover { background: #fff; }',
+    '.payarc-input:focus { outline: none; border-color: #2271b1; box-shadow: 0 0 0 1px #2271b1; }',
     '.payarc-input-error { border-color: #b32d2e; color: #b32d2e; }',
-    '.payarc-input-success { border-color: #8c8f94; }',
-    '.payarc-container, .payarc-row, .payarc-input-container { margin: 0; padding: 0; background: transparent; }'
+    '.payarc-input-success, .payarc-input-default { color: #2c3338; }'
   ].join('\n');
 
   function t(key, fallback) {
