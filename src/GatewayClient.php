@@ -19,6 +19,13 @@ class GatewayClient {
   public const SANDBOX_URL = 'https://testapi.payarc.net/v1';
 
   /**
+   * Hosts of the Hosted Fields script (iframeprocess.js) and its endpoints.
+   */
+  public const LIVE_PORTAL = 'https://portal.payarc.net';
+
+  public const SANDBOX_PORTAL = 'https://testportal.payarc.net';
+
+  /**
    * Amount authorized (then voided) by verifyCard().
    */
   public const CARD_VERIFICATION_AMOUNT = '1.00';
@@ -402,6 +409,39 @@ class GatewayClient {
    */
   public function verifyCredentials(): array {
     return $this->listCharges(1, 1);
+  }
+
+  /**
+   * Prove a Hosted Fields Client ID belongs to a merchant, without moving
+   * money: asks the portal for one iframe, as the browser script does. The
+   * portal answers a wrong Client ID with HTTP 403 (verified in the sandbox,
+   * 2026-09-24). The iframe session it opens expires unused.
+   *
+   * @param string $portalUrl
+   *   LIVE_PORTAL or SANDBOX_PORTAL, matching the Client ID's environment.
+   */
+  public function verifyClientId(string $clientId, string $portalUrl): void {
+    $clientId = trim($clientId);
+    if ($clientId === '' || preg_match('/[^A-Za-z0-9_-]/', $clientId)) {
+      throw new \InvalidArgumentException('A PayArc Client ID is required.');
+    }
+    if (!str_starts_with($portalUrl, 'https://')) {
+      throw new \InvalidArgumentException('PayArc portal URL must use HTTPS.');
+    }
+    $url = rtrim($portalUrl, '/') . '/v1/get-iframe?' . http_build_query([
+      'user' => $clientId,
+      'amount' => '1.00',
+      'fields' => json_encode([['pl' => 'Card number', 'id' => 'payarc-check', 'type' => 'CARD_NUMBER']]),
+    ]);
+    $headers = ['Accept: application/json', 'User-Agent: ' . $this->userAgent()];
+    $result = $this->transport ? ($this->transport)('GET', $url, $headers, NULL) : $this->curlRequest('GET', $url, $headers, NULL);
+    $status = (int) ($result['status'] ?? 0);
+    if ($status === 403) {
+      throw new GatewayException('PayArc does not recognise this Client ID.', 403);
+    }
+    if ($status < 200 || $status >= 300) {
+      throw new AmbiguousGatewayException('The PayArc portal returned HTTP ' . $status . '.', $status);
+    }
   }
 
   /**
