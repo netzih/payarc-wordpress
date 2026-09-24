@@ -1,7 +1,7 @@
 /* global PayarcHostedFields, payarc_gravityforms_strings, gform, gf_global, jQuery */
 /**
  * Gravity Forms front end: mounts the hosted card fields into the PayArc
- * Card field, and turns them into a payment key inside GF 3's
+ * Card field, and turns them into a single-use token inside GF 3's
  * gform/submission/pre_submission filter (aborting the submit on failure).
  */
 (function (window, document) {
@@ -18,7 +18,7 @@
     var el = errorElement(h);
     if (el) {
       el.textContent = text || '';
-      // Raw gateway or Pay.js text for support; the visible text is payer wording.
+      // Raw gateway text for support; the visible text is payer wording.
       el.dataset.rawError = raw ? String(raw) : '';
     }
   }
@@ -112,7 +112,7 @@
   }
 
   /**
-   * The form's current total as Apple Pay wants it: "50.00", or "0.00" when
+   * The form's current total as the wallet window wants it: "50.00", or "0.00" when
    * there is nothing to charge yet.
    *
    * Gravity Forms 3 keeps the products of every form in gform.state, updated
@@ -152,28 +152,27 @@
     }
   }
 
-  function mountApplePay(formId, h) {
-    var wrapper = document.getElementById(h.container.id.replace(/-card$/, '-apple-pay'));
-    if (!wrapper || h.container.dataset.applePay !== '1' || !cfg.applePay || cfg.applePay.enabled !== '1') {
+  function mountWallets(formId, h) {
+    var wrapper = document.getElementById(h.container.id.replace(/-card$/, '-wallets'));
+    var wallets = (cfg.wallets && cfg.wallets.enabled) || [];
+    if (!wrapper || h.container.dataset.wallets !== '1' || !wallets.length) {
       return;
     }
-    PayarcHostedFields.applePay({
-      client: h.client,
-      targetDiv: wrapper.querySelector('.payarc-apple-pay-button').id,
-      displayName: cfg.applePay.displayName,
-      countryCode: cfg.applePay.countryCode,
-      currencyCode: cfg.applePay.currencyCode,
-      buttonType: 'plain',
+    PayarcHostedFields.wallets({
+      clientId: cfg.clientId,
+      scriptUrl: cfg.scriptUrl,
+      targetDiv: wrapper.querySelector('.payarc-wallet-buttons'),
+      wallets: wallets,
       getAmount: function () { return formTotal(formId); },
-      onKey: function (key) {
+      onKey: function (token) {
         setError(h, '');
-        h.input.value = key;
+        h.input.value = token;
         submitForm(formId);
       },
       onError: function (text) { setError(h, text); },
       onCancel: function () { setError(h, ''); }
-    }).then(function (entry) {
-      if (entry) {
+    }).then(function (row) {
+      if (row) {
         wrapper.hidden = false;
       }
     });
@@ -188,25 +187,24 @@
     container.dataset.payarcMounted = '1';
     var input = form.querySelector('input.payarc-payment-key');
     if (input) {
-      // A key echoed back after a server-side validation error is single-use
-      // and possibly expired; always tokenize afresh.
+      // A token echoed back after a server-side validation error is
+      // single-use and possibly used already; always tokenize afresh.
       input.value = '';
     }
-    var h = { container: container, input: input, form: form, client: null, cardEntry: null };
+    var h = { container: container, input: input, form: form, fields: null };
     handles[formId] = h;
-    if (cfg.configured !== '1' || !cfg.publicKey) {
+    if (cfg.configured !== '1' || !cfg.clientId) {
       setError(h, (cfg.i18n && cfg.i18n.notConfigured) || 'The payment form is not configured.');
       return;
     }
     PayarcHostedFields.mount({
-      publicKey: cfg.publicKey,
-      payJsUrl: cfg.payJsUrl,
+      clientId: cfg.clientId,
+      scriptUrl: cfg.scriptUrl,
       container: container,
       onFieldError: function (text) { setError(h, text); }
     }).then(function (mounted) {
-      h.client = mounted.client;
-      h.cardEntry = mounted.cardEntry;
-      mountApplePay(formId, h);
+      h.fields = mounted;
+      mountWallets(formId, h);
     }).catch(function (error) {
       setError(h, PayarcHostedFields.errorText(error));
     });
@@ -225,7 +223,7 @@
         return data;
       }
       var types = window.gform.submission || {};
-      // Only the final submit: a key minted on "Next" would be cleared when the
+      // Only the final submit: a token minted on "Next" would be cleared when the
       // following page renders, so the card field must be on the last page.
       if (data.submissionType !== types.SUBMISSION_TYPE_SUBMIT) {
         return data;
@@ -242,13 +240,13 @@
       if (h.input.value) {
         return data;
       }
-      if (!h.client) {
+      if (!h.fields) {
         setError(h, (cfg.i18n && cfg.i18n.notConfigured) || 'The payment form is not configured.');
         data.abort = true;
         return data;
       }
       try {
-        h.input.value = await PayarcHostedFields.tokenize(h);
+        h.input.value = await PayarcHostedFields.tokenize(h.fields);
         setError(h, '');
       } catch (error) {
         setError(h, PayarcHostedFields.errorText(error), error && error.raw ? error.raw : PayarcHostedFields.errorText(error));

@@ -11,7 +11,7 @@ use Payarc\DonorMessage;
  */
 final class Plugin {
 
-  public const VERSION = '0.2.0';
+  public const VERSION = '0.1.0';
 
   public const SLUG = 'payarc-payments';
 
@@ -49,6 +49,11 @@ final class Plugin {
     DonorMessage::setTranslator(static fn(string $text): string => __($text, 'payarc-payments'));
 
     add_action('init', [$this, 'loadTextdomain']);
+    // Payer wording for the shared Hosted Fields helper, whichever module
+    // enqueued it (Gravity Forms enqueues while the form renders).
+    foreach (['wp_print_scripts', 'wp_print_footer_scripts', 'admin_print_footer_scripts'] as $hook) {
+      add_action($hook, [$this, 'localizeHostedFields'], 1);
+    }
     if (is_admin()) {
       (new Admin\SettingsPage($this->settings, $this->gateway))->register();
     }
@@ -169,6 +174,36 @@ final class Plugin {
     }
     $summary = (new Modules\GiveWP\Renewals())->run();
     Log::debug('GiveWP renewals', $summary);
+  }
+
+  public function localizeHostedFields(): void {
+    static $done = FALSE;
+    if ($done || !wp_script_is('payarc-hostedfields', 'enqueued')) {
+      return;
+    }
+    $done = TRUE;
+    wp_localize_script('payarc-hostedfields', 'PayarcHostedFieldsConfig', ['i18n' => [
+      'cardNumber' => __('Card number', 'payarc-payments'),
+      'expiry' => __('MM/YY', 'payarc-payments'),
+      'cvv' => __('CVV', 'payarc-payments'),
+      'zip' => __('ZIP', 'payarc-payments'),
+      'unableToValidate' => __('Unable to validate the card.', 'payarc-payments'),
+      'checkExpiry' => __('Please check the expiration date (MM/YY).', 'payarc-payments'),
+      'checkCvv' => __('Please check the security code (the 3 or 4 digit CVV).', 'payarc-payments'),
+      'checkZip' => __('Please check the billing ZIP code.', 'payarc-payments'),
+      'checkCard' => __('Please check the card number, expiration date and security code.', 'payarc-payments'),
+      'misconfigured' => __('The payment form is not configured correctly, so no charge was made. Please contact us.', 'payarc-payments'),
+      'sessionExpired' => __('The card form timed out. Please enter your card details again.', 'payarc-payments'),
+      'noResponse' => __('The card processor did not respond. Please wait a moment and try again.', 'payarc-payments'),
+      'loadFailed' => __('The secure PayArc card form could not be loaded.', 'payarc-payments'),
+      'noKey' => __('PayArc did not return a card token.', 'payarc-payments'),
+      'reload' => __('The card form was reset. Please enter your card details again.', 'payarc-payments'),
+      'enterCard' => __('Please enter your card details.', 'payarc-payments'),
+      'busy' => __('Please wait, your card is being checked.', 'payarc-payments'),
+      'applePay' => __('Pay with Apple Pay', 'payarc-payments'),
+      'googlePay' => __('Pay with Google Pay', 'payarc-payments'),
+      'chooseAmount' => __('Please choose an amount before paying with a wallet.', 'payarc-payments'),
+    ]]);
   }
 
   public function loadTextdomain(): void {

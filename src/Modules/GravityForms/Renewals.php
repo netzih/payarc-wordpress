@@ -3,10 +3,12 @@
 namespace Payarc\WordPress\Modules\GravityForms;
 
 use Payarc\AmbiguousGatewayException;
+use Payarc\Charge;
 use Payarc\GatewayException;
 use Payarc\ReconciliationInconclusiveException;
 use Payarc\WordPress\Gateway;
 use Payarc\WordPress\Lock;
+use Payarc\WordPress\Reconcile;
 use Payarc\WordPress\Settings;
 
 /**
@@ -14,11 +16,13 @@ use Payarc\WordPress\Settings;
  *
  * Runs from GF's hourly {slug}_cron. Each installment has a scheduled date;
  * a decline is retried every Schedule::RETRY_DAYS up to Schedule::MAX_ATTEMPTS
- * times, then the subscription is cancelled. The orderid sent to PayArc is
- * unique per entry/installment/attempt and is written to the entry (with the
- * time) BEFORE the charge is sent; it is cleared only once the outcome has
- * been recorded. A run that finds the marker looks the orderid up first, so a
- * crash or lost response anywhere in between never leads to a second charge.
+ * times, then the subscription is cancelled. The orderid is unique per
+ * entry/installment/attempt; it is sent as PayArc's Idempotency-Key and
+ * written to the entry (with the time) BEFORE the charge is sent, and cleared
+ * only once the outcome has been recorded. A run that finds the marker sends
+ * the same key again while PayArc still holds it (getting the earlier result
+ * back) and looks the charge up by it after that, so a crash or lost response
+ * anywhere in between never leads to a second charge.
  */
 final class Renewals {
 
@@ -153,48 +157,53 @@ final class Renewals {
       }
       $payer = is_array($meta('payarc_payer')) ? $meta('payarc_payer') : [];
       $orderId = Gateway::orderId(Schedule::orderId($id, $scheduled, $attempt));
-      $metadata = $this->gateway->metadata(
+      $options = $this->gateway->chargeOptions(
         Schedule::invoice($id),
         (string) $meta('payarc_form_title') ?: sprintf(__('Gravity Forms entry %d', 'payarc-payments'), $id),
         $payer,
-        ['currency' => (string) rgar($entry, 'currency') ?: 'USD', 'orderid' => $orderId]
+        ['recurring' => TRUE]
       );
-      // Renewals run without a browser; the stored IP would be misleading.
-      unset($metadata['clientip']);
+      // Renewals run without a browser; the request's IP would be misleading.
+      unset($options['metadata']['client_ip']);
       $reference = (string) $meta('payarc_card_reference');
       $pendingOrderId = (string) $meta('payarc_reconcile_order_id');
       $pendingSentAt = (int) $meta('payarc_reconcile_sent_at', 0);
       $response = NULL;
+      $key = $orderId;
 
       try {
         $client = $this->gateway->client(AddOn::INTEGRATION);
         if ($pendingOrderId !== '') {
           // A previous run sent this charge and never recorded the answer.
-          // Find out what happened before sending another one; an unanswered
-          // lookup keeps the marker and ends this run without a charge.
-          $response = $this->findTransaction($client, $pendingOrderId, $pendingSentAt ?: NULL, AddOn::money($amount));
-          if ($response && Gateway::transactionReference($response) === (string) $meta('payarc_last_transaction_key')) {
-            // Recorded in full by a run that died just before clearing the
-            // marker; this run is for the next installment.
-            $this->clearMarker($id);
-            $response = NULL;
-          }
-          elseif ($response && Gateway::approved($response)) {
-            // Either never recorded, or recorded in part by a run that died
-            // half-way: recordSuccess() finds its own record of the
-            // transaction and finishes from the same values.
-            $this->addon->add_note($id, sprintf(__('PayArc confirms the earlier charge %s was processed; recorded without charging again.', 'payarc-payments'), $pendingOrderId));
-          }
-          elseif ($response) {
-            $this->addon->add_note($id, sprintf(__('PayArc shows the earlier charge %s was declined; recorded without charging again.', 'payarc-payments'), $pendingOrderId));
+          if ($pendingSentAt >= time() - Reconcile::REPLAY_WINDOW) {
+            // PayArc still holds the key: sending it again returns the
+            // earlier result, or makes the charge if it never arrived.
+            $key = $pendingOrderId;
           }
           else {
-            $this->addon->add_note($id, sprintf(__('PayArc has no record of the earlier charge %s; charging now.', 'payarc-payments'), $pendingOrderId));
+            // Find out what happened before sending another one; an
+            // unanswered lookup keeps the marker and ends this run.
+            $response = $this->findCharge($client, $pendingOrderId, $pendingSentAt ?: NULL, AddOn::money($amount));
+            if ($response && Gateway::transactionReference($response) === (string) $meta('payarc_last_transaction_key')) {
+              // Recorded in full by a run that died just before clearing the
+              // marker; this run is for the next installment.
+              $this->clearMarker($id);
+              $response = NULL;
+            }
+            elseif ($response) {
+              // Either never recorded, or recorded in part by a run that died
+              // half-way: recordSuccess() finds its own record of the
+              // charge and finishes from the same values.
+              $this->addon->add_note($id, sprintf(__('PayArc confirms the earlier charge %s was processed; recorded without charging again.', 'payarc-payments'), $pendingOrderId));
+            }
+            else {
+              $this->addon->add_note($id, sprintf(__('PayArc has no approved charge for %s; charging now.', 'payarc-payments'), $pendingOrderId));
+            }
           }
         }
         if ($response === NULL) {
-          $this->setMarker($id, $orderId);
-          $response = $client->saleWithCardReference($reference, AddOn::money($amount), $metadata);
+          $this->setMarker($id, $key);
+          $response = $this->send($client, $reference, AddOn::money($amount), ['reference' => $key] + $options);
         }
       }
       catch (ReconciliationInconclusiveException $e) {
@@ -203,28 +212,19 @@ final class Renewals {
         return 'ambiguous';
       }
       catch (AmbiguousGatewayException $e) {
+        // The marker stays: the next run sends the same key again.
         $this->addon->log_error(__METHOD__ . "(): entry #$id ambiguous: " . $e->getMessage());
-        try {
-          $found = $this->findTransaction($client, $orderId, time(), AddOn::money($amount));
-        }
-        catch (ReconciliationInconclusiveException $lookup) {
-          $found = NULL;
-        }
-        if (!$found) {
-          // The marker stays: the next run reconciles before any retry.
-          $this->addon->add_note($id, sprintf(__('PayArc did not answer when charging installment %1$s (attempt %2$d). It will be checked again next hour before any retry.', 'payarc-payments'), $scheduled->format('Y-m-d'), $attempt + 1), 'error');
-          return 'ambiguous';
-        }
-        $response = $found;
+        $this->addon->add_note($id, sprintf(__('PayArc did not give a clear answer when charging installment %1$s (attempt %2$d). It will be checked again next hour before any retry.', 'payarc-payments'), $scheduled->format('Y-m-d'), $attempt + 1), 'error');
+        return 'ambiguous';
       }
       catch (GatewayException $e) {
-        // The gateway answered: nothing was charged.
+        // PayArc answered: nothing was charged.
         $this->clearMarker($id);
-        $response = ['result_code' => 'E', 'error' => $e->getMessage()] + $e->getResponseData();
+        $response = ['failure_code' => 'ERROR', 'failure_message' => $e->getMessage()] + $e->getResponseData();
       }
       catch (\Throwable $e) {
         // Misconfiguration or a coding error must not kill the whole cron run.
-        // A marker already written stays, so the next run looks it up first.
+        // A marker already written stays, so the next run settles it first.
         $this->addon->log_error(__METHOD__ . "(): entry #$id: " . $e->getMessage());
         $this->addon->add_note($id, sprintf(__('PayArc renewal skipped: %s', 'payarc-payments'), $e->getMessage()), 'error');
         return 'skipped';
@@ -241,28 +241,47 @@ final class Renewals {
   }
 
   /**
-   * The listed transaction carrying this orderid (approved or declined), or
-   * NULL when PayArc provably has none.
+   * Charge the saved card; resend once with the same key if the answer was
+   * lost. An answer that does not say whether the card was charged is
+   * ambiguous; a partial approval is voided and treated as a decline.
+   *
+   * @throws AmbiguousGatewayException
+   * @throws GatewayException
+   */
+  private function send(\Payarc\GatewayClient $client, string $cardReference, string $amount, array $options): array {
+    try {
+      $response = $client->chargeCard($cardReference, $amount, $options);
+    }
+    catch (AmbiguousGatewayException $e) {
+      $response = $client->chargeCard($cardReference, $amount, $options);
+    }
+    $outcome = Charge::outcome($response);
+    if ($outcome === Charge::PARTIAL) {
+      $client->void(Charge::id($response), 'other', 'Partially approved');
+      return ['failure_code' => 'PARTIAL', 'failure_message' => __('Only part of the amount was approved, so the charge was voided.', 'payarc-payments')] + $response;
+    }
+    if (!in_array($outcome, [Charge::APPROVED, Charge::DECLINED], TRUE)) {
+      throw new AmbiguousGatewayException(sprintf('PayArc answered with status "%s".', (string) ($response['status'] ?? '')), 0, $response);
+    }
+    return $response;
+  }
+
+  /**
+   * The approved charge sent with this reference, or NULL when PayArc
+   * provably has none.
    *
    * @throws \Payarc\ReconciliationInconclusiveException
    *   When the answer is unknown: the listing window ran out or the lookup
    *   itself failed. Callers must not charge.
    */
-  private function findTransaction(\Payarc\GatewayClient $client, string $orderId, ?int $sentAt, string $amount): ?array {
-    try {
-      return $client->findTransactionByOrderId($orderId, $sentAt, 5, $amount);
-    }
-    catch (ReconciliationInconclusiveException $e) {
-      throw $e;
-    }
-    catch (\Throwable $lookup) {
-      $this->addon->log_error(__METHOD__ . '(): reconciliation failed: ' . $lookup->getMessage());
-      throw new ReconciliationInconclusiveException('The lookup for ' . $orderId . ' failed: ' . $lookup->getMessage(), 0, [], $lookup);
-    }
+  private function findCharge(\Payarc\GatewayClient $client, string $orderId, ?int $sentAt, string $amount): ?array {
+    $found = Reconcile::lookup($client, $orderId, $sentAt, $amount);
+    return $found && Gateway::approved($found) ? $found : NULL;
   }
 
   /**
-   * Record that a charge with this orderid is about to be sent.
+   * Record that a charge with this orderid (idempotency key) is about to be
+   * sent.
    */
   private function setMarker(int $entryId, string $orderId): void {
     gform_update_meta($entryId, 'payarc_reconcile_order_id', $orderId);
@@ -279,7 +298,7 @@ final class Renewals {
    * transaction changes nothing.
    *
    * Everything the charge changes locally is computed first and written as
-   * one record keyed by the transaction (the commit point); the metas the
+   * one record keyed by the charge (the commit point); the metas the
    * schedule and GF read are then derived from it. A run that died half-way
    * finds the record for this transaction and derives them again from the
    * same values, so an installment is never counted twice or skipped, whatever

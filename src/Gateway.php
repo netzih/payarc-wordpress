@@ -176,6 +176,31 @@ final class Gateway {
   }
 
   /**
+   * One line for an order, entry or donation note: charge id, auth code and
+   * the card checks PayArc reports.
+   */
+  public static function note(array $response, bool $sandbox): string {
+    $charge = Charge::unwrap($response);
+    $card = CardDetails::card($charge);
+    $parts = [sprintf(__('PayArc charge %s', 'payarc-payments'), self::transactionReference($charge))];
+    if (Charge::authCode($charge) !== '') {
+      $parts[] = sprintf(__('auth code %s', 'payarc-payments'), Charge::authCode($charge));
+    }
+    $avs = trim((string) ($card['avs_status'] ?? ''));
+    if ($avs !== '' && $avs !== '0') {
+      $parts[] = sprintf(__('AVS: %s', 'payarc-payments'), $avs . (!empty($card['zip_check_passed']) ? ' (' . __('ZIP matched', 'payarc-payments') . ')' : ''));
+    }
+    $cvv = trim((string) ($card['cvc_status'] ?? ''));
+    if ($cvv !== '') {
+      $parts[] = sprintf(__('CVV: %s', 'payarc-payments'), $cvv);
+    }
+    if ($sandbox) {
+      $parts[] = __('SANDBOX transaction', 'payarc-payments');
+    }
+    return implode(', ', $parts) . '.';
+  }
+
+  /**
    * The PayArc charge id (refunds and voids are made against it).
    */
   public static function transactionReference(array $response): string {

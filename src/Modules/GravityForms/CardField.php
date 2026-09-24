@@ -5,10 +5,10 @@ namespace Payarc\WordPress\Modules\GravityForms;
 use Payarc\WordPress\Plugin;
 
 /**
- * "PayArc Card" form field: a container the Pay.js hosted card fields are
- * mounted into, plus a hidden input carrying the single-use payment key.
- * Card data never reaches this server; the entry stores only "Visa ending
- * in 2224" after the charge.
+ * "PayArc Card" form field: a container the PayArc Hosted Fields are mounted
+ * into, plus a hidden input carrying the single-use card token. Card data
+ * never reaches this server; the entry stores only "Visa ending in 5439"
+ * after the charge.
  */
 final class CardField extends \GF_Field {
 
@@ -81,19 +81,19 @@ final class CardField extends \GF_Field {
         $warning = '<p class="payarc-card-note payarc-card-note--warning">' . esc_html__('Move this field to the last page. Card details are tokenized when the form is submitted, so the card fields must be on the page that submits it.', 'payarc-payments') . '</p>';
       }
       return '<div class="ginput_container ginput_container_payarc_card">'
-        . '<div class="payarc-card-element payarc-card-element--preview" aria-hidden="true"><span>' . esc_html__('Card number', 'payarc-payments') . '</span><span>' . esc_html__('MM/YY', 'payarc-payments') . '</span><span>' . esc_html__('CVV', 'payarc-payments') . '</span></div>'
+        . '<div class="payarc-card-element payarc-card-element--preview" aria-hidden="true"><span>' . esc_html__('Card number', 'payarc-payments') . '</span><span>' . esc_html__('MM/YY', 'payarc-payments') . '</span><span>' . esc_html__('CVV', 'payarc-payments') . '</span><span>' . esc_html__('ZIP', 'payarc-payments') . '</span></div>'
         . '<p class="payarc-card-note">' . $note . '</p>' . $warning . '</div>';
     }
 
-    $apple_pay = $this->applePayAllowed($form) ? '1' : '0';
+    $wallets = $this->walletsAllowed($form) ? '1' : '0';
     $input_id = 'input_' . $form_id . '_' . $id;
 
     return '<div class="ginput_container ginput_container_payarc_card" data-payarc-form="' . $form_id . '" data-payarc-field="' . $id . '">'
-      . '<div class="payarc-apple-pay" id="' . esc_attr($base) . '-apple-pay" hidden>'
-      . '<div class="payarc-apple-pay-button" id="' . esc_attr($base) . '-apple-pay-button"></div>'
-      . '<div class="payarc-apple-pay-divider"><span>' . esc_html__('or enter card details', 'payarc-payments') . '</span></div>'
+      . '<div class="payarc-wallets-wrapper" id="' . esc_attr($base) . '-wallets" hidden>'
+      . '<div class="payarc-wallet-buttons"></div>'
+      . '<div class="payarc-wallet-divider"><span>' . esc_html__('or enter card details', 'payarc-payments') . '</span></div>'
       . '</div>'
-      . '<div class="payarc-card-element" id="' . esc_attr($base) . '-card" data-form-id="' . $form_id . '" data-field-id="' . $id . '" data-apple-pay="' . $apple_pay . '" aria-label="' . esc_attr__('Secure card details', 'payarc-payments') . '"></div>'
+      . '<div class="payarc-card-element" id="' . esc_attr($base) . '-card" data-form-id="' . $form_id . '" data-field-id="' . $id . '" data-wallets="' . $wallets . '" aria-label="' . esc_attr__('Secure card details', 'payarc-payments') . '"></div>'
       . '<div class="payarc-card-errors" id="' . esc_attr($base) . '-errors" role="alert" aria-live="polite"></div>'
       . '<input type="hidden" class="payarc-payment-key" name="input_' . $id . '" id="' . esc_attr($input_id) . '" value="" autocomplete="off">'
       . '<p class="payarc-card-note">' . $note . '</p>'
@@ -101,7 +101,7 @@ final class CardField extends \GF_Field {
   }
 
   /**
-   * The single-use key is minted when the form is submitted, so on a
+   * The single-use token is minted when the form is submitted, so on a
    * multi-page form the field has to sit on the last page.
    */
   private function notOnLastPage(array $form): bool {
@@ -115,11 +115,12 @@ final class CardField extends \GF_Field {
   }
 
   /**
-   * Apple Pay keys are single-use, so the button is offered only when every
-   * active PayArc feed on the form is a one-time payment.
+   * Wallet tokens cannot be saved for later charges, so the Apple Pay and
+   * Google Pay buttons are offered only when every active PayArc feed on the
+   * form is a one-time payment.
    */
-  private function applePayAllowed(array $form): bool {
-    if (!Plugin::instance()->settings()->applePayEnabled() || !class_exists(AddOn::class)) {
+  private function walletsAllowed(array $form): bool {
+    if (!Plugin::instance()->settings()->walletsEnabled() || !class_exists(AddOn::class)) {
       return FALSE;
     }
     $feeds = AddOn::get_instance()->get_active_feeds((int) ($form['id'] ?? 0));
@@ -142,8 +143,8 @@ final class CardField extends \GF_Field {
   }
 
   /**
-   * The posted value is a single-use payment key; it must never be stored.
-   * After a successful charge the add-on supplies "Visa ending in 2224".
+   * The posted value is a single-use card token; it must never be stored.
+   * After a successful charge the add-on supplies "Visa ending in 5439".
    */
   public function get_value_save_input($value, $form, $input_name, $entry_id, $entry, $repeater_index = '') {
     $summary = class_exists(AddOn::class) ? AddOn::get_instance()->cardSummaryForEntry() : '';

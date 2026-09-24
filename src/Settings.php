@@ -174,6 +174,18 @@ final class Settings {
     return $this->applePayEnabled() || $this->googlePayEnabled();
   }
 
+  /**
+   * The enabled wallets as PayArc names them: 'apple-pay', 'google-pay'.
+   *
+   * @return string[]
+   */
+  public function wallets(): array {
+    return array_values(array_filter([
+      $this->applePayEnabled() ? 'apple-pay' : '',
+      $this->googlePayEnabled() ? 'google-pay' : '',
+    ]));
+  }
+
   public function debugLog(): bool {
     return !empty($this->get('debug_log'));
   }

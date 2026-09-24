@@ -33,16 +33,16 @@ final class Schedule {
   }
 
   /**
-   * Idempotency reference sent as PayArc's orderid: one per entry,
-   * installment date and attempt, so a double cron run can be reconciled by
-   * looking the reference up instead of charging twice.
+   * Idempotency key sent to PayArc (and stored as the charge's reference):
+   * one per entry, installment date and attempt, so a double cron run gets
+   * the earlier charge back instead of charging twice.
    */
   public static function orderId(int $entryId, \DateTimeImmutable $scheduled, int $attempt): string {
     return sprintf('gf-%d-%s-%d', $entryId, $scheduled->format('Y-m-d'), max(0, $attempt));
   }
 
   /**
-   * Invoice reference shown in the PayArc console (and copied onto refunds).
+   * Invoice reference stored with the charge (metadata 'invoice').
    */
   public static function invoice(int $entryId): string {
     return 'GF-' . $entryId;

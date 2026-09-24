@@ -4,6 +4,7 @@ namespace Payarc\WordPress\Modules\GravityForms;
 
 use Payarc\AmbiguousGatewayException;
 use Payarc\ReconciliationInconclusiveException;
+use Payarc\UnsettledPartialRefundException;
 use Payarc\WordPress\BusyException;
 use Payarc\WordPress\Reconcile;
 use Payarc\GatewayException;
@@ -12,10 +13,11 @@ use Payarc\WordPress\Log;
 use Payarc\WordPress\Plugin;
 
 /**
- * Gravity Forms payment add-on. One-time feeds charge the Pay.js key in
- * authorize(); subscription feeds charge the first installment with
- * save_card and the renewal worker (check_status, hourly) charges the saved
- * card reference on schedule. Nothing is scheduled at PayArc.
+ * Gravity Forms payment add-on. One-time feeds charge the Hosted Fields
+ * token in authorize(); subscription feeds save the card at PayArc, charge
+ * the first installment to the saved card, and the renewal worker
+ * (check_status, hourly) charges it on schedule. Nothing is scheduled at
+ * PayArc.
  */
 final class AddOn extends \GFPaymentAddOn {
 
@@ -52,7 +54,7 @@ final class AddOn extends \GFPaymentAddOn {
   private static ?AddOn $_instance = NULL;
 
   /**
-   * "Visa ending in 2224" for the card field to store once the charge went through.
+   * "Visa ending in 5439" for the card field to store once the charge went through.
    */
   private string $cardSummary = '';
 
@@ -211,7 +213,7 @@ final class AddOn extends \GFPaymentAddOn {
   // ---------------------------------------------------------------------
 
   /**
-   * One-time payment: charge the payment key immediately and hand GF the
+   * One-time payment: charge the card token immediately and hand GF the
    * captured payment, so capture() is never needed.
    */
   public function authorize($feed, $submission_data, $form, $entry) {
@@ -227,14 +229,13 @@ final class AddOn extends \GFPaymentAddOn {
     $uniqueId = $this->submissionId($form);
     $orderId = Gateway::orderId('gf-' . (int) $form['id'] . '-' . $uniqueId);
     $payer = $this->payer($submission_data);
-    $metadata = $this->gateway()->metadata(
+    $options = $this->gateway()->chargeOptions(
       'GF' . (int) $form['id'] . '-' . substr($uniqueId, 0, 12),
       $this->description($form, $feed),
-      $payer,
-      ['currency' => \GFCommon::get_currency(), 'orderid' => $orderId]
+      $payer
     );
 
-    $outcome = $this->charge(static fn($client) => $client->saleWithPaymentKey($key, self::money($amount), $metadata), $orderId, self::money($amount));
+    $outcome = $this->charge(static fn($client, $reference) => $client->chargeToken($key, self::money($amount), ['reference' => $reference] + $options), $orderId, self::money($amount));
     if (!empty($outcome['error'])) {
       return $this->authorization_error($outcome['error']);
     }
@@ -246,7 +247,6 @@ final class AddOn extends \GFPaymentAddOn {
       'payarc_mode' => Plugin::instance()->settings()->mode(),
       'payarc_order_id' => $orderId,
       'payarc_transaction_key' => $reference,
-      'payarc_refnum' => (string) rgar($response, 'refnum'),
       'payarc_card_brand' => (string) $card['brand'],
       'payarc_card_last4' => (string) $card['last4'],
       'payarc_payer' => $payer,
@@ -267,8 +267,10 @@ final class AddOn extends \GFPaymentAddOn {
   }
 
   /**
-   * Subscription: charge the first installment (or verify the card for a
-   * free trial) with save_card, then schedule the rest locally.
+   * Subscription: save the card at PayArc, charge the first installment to
+   * the saved card (or verify it for a free trial), then schedule the rest
+   * locally. Charging the saved card, not the token, proves at signup that
+   * later installments can be charged.
    */
   public function subscribe($feed, $submission_data, $form, $entry) {
     $key = $this->postedPaymentKey($form);
@@ -291,30 +293,42 @@ final class AddOn extends \GFPaymentAddOn {
     $subscriptionId = 'gf-sub-' . substr($uniqueId, 0, 16);
     $orderId = Gateway::orderId('gf-' . (int) $form['id'] . '-' . $uniqueId);
     $payer = $this->payer($submission_data);
-    $metadata = $this->gateway()->metadata(
-      'GF' . (int) $form['id'] . '-' . substr($uniqueId, 0, 12),
-      $this->description($form, $feed),
-      $payer,
-      ['currency' => \GFCommon::get_currency(), 'orderid' => $orderId]
-    );
+    $description = $this->description($form, $feed);
+    $options = $this->gateway()->chargeOptions('GF' . (int) $form['id'] . '-' . substr($uniqueId, 0, 12), $description, $payer);
 
-    if ($firstAmount > 0) {
-      $outcome = $this->charge(static fn($client) => $client->saleWithPaymentKey($key, self::money($firstAmount), $metadata, TRUE), $orderId, self::money($firstAmount));
-    }
-    else {
-      $outcome = $this->charge(static fn($client) => $client->verifyAndSaveCardWithPaymentKey($key, $metadata), $orderId, \Payarc\GatewayClient::CARD_VERIFICATION_AMOUNT);
-    }
+    // The card is saved inside the guarded call: Gateway::saveCard() hands
+    // back the same saved card for a token it has seen, so a replay after a
+    // lost answer charges the same card.
+    $gateway = $this->gateway();
+    $saved = NULL;
+    $call = static function ($client, $reference) use ($gateway, $key, $payer, $description, $options, $firstAmount, &$saved) {
+      $saved = $gateway->saveCard($client, $key, $payer, $description);
+      return $firstAmount > 0
+        ? $client->chargeCard($saved['reference'], self::money($firstAmount), ['reference' => $reference] + $options)
+        : $client->verifyCard($saved['reference'], ['reference' => $reference] + $options);
+    };
+    $outcome = $this->charge($call, $orderId, $firstAmount > 0 ? self::money($firstAmount) : \Payarc\GatewayClient::CARD_VERIFICATION_AMOUNT);
     if (!empty($outcome['error'])) {
       return $this->authorization_error($outcome['error']);
     }
     $response = $outcome['response'];
-    $cardReference = trim((string) rgars($response, 'savedcard/key'));
+    if ($saved === NULL) {
+      // Recovered from an earlier attempt without running the call: the card
+      // saved then is remembered per token.
+      try {
+        $saved = $gateway->saveCard($gateway->client(self::INTEGRATION), $key, $payer, $description);
+      }
+      catch (\Throwable $e) {
+        $this->log_error(__METHOD__ . '(): charged, but the saved card could not be found again: ' . $e->getMessage());
+      }
+    }
+    $cardReference = trim((string) ($saved['reference'] ?? ''));
     if ($cardReference === '') {
       // Charged (or verified) but nothing to charge later: undo and refuse.
       $this->log_error(__METHOD__ . '(): approved without a saved card reference; voiding.');
       if ($firstAmount > 0) {
         try {
-          $this->gateway()->client(self::INTEGRATION)->void(Gateway::transactionReference($response));
+          $gateway->client(self::INTEGRATION)->void(Gateway::transactionReference($response), 'other', 'Card could not be saved');
         }
         catch (\Throwable $e) {
           $this->log_error(__METHOD__ . '(): void failed: ' . $e->getMessage());
@@ -323,7 +337,7 @@ final class AddOn extends \GFPaymentAddOn {
       return $this->authorization_error(__('The card could not be saved for future payments. Please try a different card or contact us.', 'payarc-payments'));
     }
 
-    $card = Gateway::card($response);
+    $card = array_filter((array) ($saved['card'] ?? [])) + Gateway::card($response);
     $this->cardSummary = self::summary($card);
     $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
     $nextDate = Schedule::installmentDate($now, $length, $unit, 1);
@@ -422,7 +436,7 @@ final class AddOn extends \GFPaymentAddOn {
       <label for="payarc-refund-amount"><?php esc_html_e('Refund amount', 'payarc-payments'); ?></label>
       <input type="number" step="0.01" min="0.01" max="<?php echo esc_attr((string) rgar($entry, 'payment_amount')); ?>" id="payarc-refund-amount" value="<?php echo esc_attr((string) rgar($entry, 'payment_amount')); ?>" style="width:7em">
       <button type="button" class="button" id="payarc-refund-button" data-entry-id="<?php echo (int) $entry['id']; ?>" data-nonce="<?php echo esc_attr(wp_create_nonce('payarc_gf_refund')); ?>"><?php esc_html_e('Refund via PayArc', 'payarc-payments'); ?></button>
-      <p class="description"><?php esc_html_e('Unsettled (same-day) sales can only be voided in full; settled sales can be refunded in full or in part.', 'payarc-payments'); ?></p>
+      <p class="description"><?php esc_html_e('A full refund of a sale that has not settled yet (normally the same day) voids it. Partial refunds are possible once the sale has settled.', 'payarc-payments'); ?></p>
       <div id="payarc-refund-result"></div>
     </div>
     <?php
@@ -452,38 +466,32 @@ final class AddOn extends \GFPaymentAddOn {
 
     try {
       $client = $this->gateway()->client(self::INTEGRATION, $mode !== '' ? $mode : NULL);
-      $transaction = $client->getTransaction($reference);
-      $status = (string) rgar($transaction, 'status_code');
-      $full = abs($amount - $paid) < 0.005;
-      if ($status === 'P' || $status === 'A') {
-        if (!$full) {
-          wp_send_json_error(['message' => __('This sale has not settled yet, so it can only be voided in full. Try a partial refund tomorrow.', 'payarc-payments')]);
-        }
-        $response = $client->void($reference);
-        $action = 'void';
+      // A marker on the entry makes sure a refund whose answer was lost is
+      // found on the sale, not sent again.
+      [$read, $write] = Reconcile::metaStore(
+        static fn() => gform_get_meta($entry_id, 'payarc_refund_sent'),
+        static function (array $marker) use ($entry_id): void { gform_update_meta($entry_id, 'payarc_refund_sent', $marker); },
+        static function () use ($entry_id): void { gform_delete_meta($entry_id, 'payarc_refund_sent'); }
+      );
+      $result = Reconcile::once(
+        $client,
+        $read,
+        $write,
+        Gateway::orderId('gf-refund-' . $entry_id),
+        self::money($amount),
+        static fn($c, $key) => $c->refund($reference, self::money($amount), ['reference' => $key, 'description' => sprintf('Gravity Forms entry %d', $entry_id)]),
+        Reconcile::REFUND,
+        $reference
+      );
+      if ($result['reconciled'] && abs((float) $result['amount'] - $amount) >= 0.005) {
+        wp_send_json_error(['message' => Reconcile::refundMismatchMessage(\GFCommon::to_money((float) $result['amount'], $entry['currency']), $reference)]);
       }
-      else {
-        $action = 'refund';
-        // Refunds inherit the sale's orderid at PayArc. A marker on the entry
-        // makes sure a refund whose answer was lost is found, not repeated.
-        $saleOrderId = trim((string) rgar($transaction, 'orderid'));
-        if ($saleOrderId === '') {
-          $response = $client->refund($reference, self::money($amount));
-        }
-        else {
-          [$read, $write] = Reconcile::metaStore(
-            static fn() => gform_get_meta($entry_id, 'payarc_refund_sent'),
-            static function (array $marker) use ($entry_id): void { gform_update_meta($entry_id, 'payarc_refund_sent', $marker); },
-            static function () use ($entry_id): void { gform_delete_meta($entry_id, 'payarc_refund_sent'); }
-          );
-          $result = Reconcile::once($client, $read, $write, $saleOrderId, self::money($amount), static fn($c) => $c->refund($reference, self::money($amount)), \Payarc\GatewayClient::TYPES_REFUND);
-          if ($result['reconciled'] && abs((float) $result['amount'] - $amount) >= 0.005) {
-            wp_send_json_error(['message' => Reconcile::refundMismatchMessage(\GFCommon::to_money((float) $result['amount'], $entry['currency']), Gateway::transactionReference($result['response']))]);
-          }
-          $response = $result['response'];
-          $clearRefundMarker = $write;
-        }
-      }
+      $response = $result['response'];
+      $clearRefundMarker = $write;
+      $action = in_array(strtolower((string) ($response['status'] ?? '')), ['void', 'voided'], TRUE) ? 'void' : 'refund';
+    }
+    catch (UnsettledPartialRefundException $e) {
+      wp_send_json_error(['message' => __('This sale has not settled yet. Refunding part of it now would cancel the whole sale at PayArc, so nothing was sent. Refund the full amount, or refund part of it after the sale settles (normally the next business day).', 'payarc-payments')]);
     }
     catch (ReconciliationInconclusiveException | AmbiguousGatewayException | BusyException $e) {
       $this->log_error(__METHOD__ . '(): ' . $e->getMessage());
@@ -493,18 +501,19 @@ final class AddOn extends \GFPaymentAddOn {
       $this->log_error(__METHOD__ . '(): ' . $e->getMessage());
       wp_send_json_error(['message' => $e->getMessage()]);
     }
-    if (!Gateway::approved($response)) {
+    if (!Gateway::reversed($response)) {
       $failure = Gateway::failure($response);
       $this->log_error(__METHOD__ . '(): ' . $failure['gateway']);
       wp_send_json_error(['message' => $failure['gateway']]);
     }
 
-    $refundReference = Gateway::transactionReference($response) ?: $reference;
+    // PayArc refunds and voids live on the sale; there is no separate id.
+    $refundReference = $reference;
     $this->refund_payment($entry, [
       'transaction_id' => $refundReference,
       'amount' => $amount,
       'note' => $action === 'void'
-        ? sprintf(__('Sale voided before settlement via PayArc. Reference: %s', 'payarc-payments'), $refundReference)
+        ? sprintf(__('Sale voided before settlement via PayArc (the whole charge). Reference: %s', 'payarc-payments'), $refundReference)
         : sprintf(__('Refunded %1$s via PayArc. Reference: %2$s', 'payarc-payments'), \GFCommon::to_money($amount, $entry['currency']), $refundReference),
     ]);
     if (isset($clearRefundMarker)) {
@@ -537,18 +546,14 @@ final class AddOn extends \GFPaymentAddOn {
         'deps' => ['payarc-hostedfields', 'gform_gravityforms'],
         'in_footer' => TRUE,
         'strings' => [
-          'publicKey' => $settings->publicKey(),
-          'payJsUrl' => $settings->payJsUrl(),
+          'clientId' => $settings->clientId(),
+          'scriptUrl' => $settings->hostedFieldsUrl(),
           'configured' => $settings->isConfigured() ? '1' : '0',
-          'applePay' => [
-            'enabled' => $settings->applePayEnabled() ? '1' : '0',
-            'displayName' => $settings->applePayDisplayName(),
-            'countryCode' => 'US',
-            'currencyCode' => \GFCommon::get_currency(),
+          'wallets' => [
+            'enabled' => $settings->wallets(),
           ],
           'i18n' => [
             'notConfigured' => __('The payment form is not configured correctly, so no charge was made. Please contact us.', 'payarc-payments'),
-            'chooseAmount' => __('Please choose an amount before paying with Apple Pay.', 'payarc-payments'),
           ],
         ],
         'enqueue' => [['field_types' => [CardField::TYPE]]],
@@ -596,7 +601,8 @@ final class AddOn extends \GFPaymentAddOn {
    * keyed by the orderid (which is derived from GF's per-submission unique id,
    * so a resubmit after an error carries the same one) is stored before the
    * request and an earlier approval is found and reused instead of charged
-   * again. $amount is what the transaction must show to count as that charge.
+   * again. $amount is what the charge must show to count as that charge.
+   * $call gets the client and the idempotency key to send as 'reference'.
    *
    * @return array{response?: array, error?: string, reconciled?: bool}
    */
@@ -616,11 +622,11 @@ final class AddOn extends \GFPaymentAddOn {
         $response = $result['response'];
         $reconciled = $result['reconciled'];
         if ($reconciled) {
-          $this->log_debug(__METHOD__ . '(): reconciled ' . $orderId . ' to ' . rgar($response, 'key'));
+          $this->log_debug(__METHOD__ . '(): reconciled ' . $orderId . ' to ' . Gateway::transactionReference($response));
         }
       }
       else {
-        $response = $call($client);
+        $response = $call($client, '');
       }
     }
     catch (ReconciliationInconclusiveException $e) {
@@ -657,7 +663,8 @@ final class AddOn extends \GFPaymentAddOn {
     }
     if (!empty($response['void_error'])) {
       // The card was saved, but the $1 verification hold was not released;
-      // it expires on its own. Logged so the console can be checked.
+      // it expires on its own after seven days. Logged so the dashboard can
+      // be checked.
       $this->log_error(__METHOD__ . '(): card saved but the verification hold was not voided: ' . $response['void_error']);
     }
     return ['response' => $response, 'reconciled' => $reconciled];
@@ -719,25 +726,7 @@ final class AddOn extends \GFPaymentAddOn {
   }
 
   public function gatewayNote(array $response): string {
-    $parts = [sprintf(__('PayArc reference %s', 'payarc-payments'), Gateway::transactionReference($response))];
-    if (rgar($response, 'refnum')) {
-      $parts[] = sprintf(__('refnum %s', 'payarc-payments'), rgar($response, 'refnum'));
-    }
-    if (rgar($response, 'authcode')) {
-      $parts[] = sprintf(__('auth code %s', 'payarc-payments'), rgar($response, 'authcode'));
-    }
-    $avs = rgars($response, 'avs/result');
-    if ($avs) {
-      $parts[] = sprintf(__('AVS: %s', 'payarc-payments'), $avs);
-    }
-    $cvc = rgars($response, 'cvc/result');
-    if ($cvc) {
-      $parts[] = sprintf(__('CVV: %s', 'payarc-payments'), $cvc);
-    }
-    if (Plugin::instance()->settings()->isSandbox()) {
-      $parts[] = __('SANDBOX transaction', 'payarc-payments');
-    }
-    return implode(', ', $parts) . '.';
+    return Gateway::note($response, Plugin::instance()->settings()->isSandbox());
   }
 
   public static function money(float $amount): string {
