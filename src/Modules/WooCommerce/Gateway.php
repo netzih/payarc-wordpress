@@ -264,6 +264,10 @@ final class Gateway extends \WC_Payment_Gateway {
     elseif ($paymentKey === '') {
       return $this->failure(__('Please enter your card details.', 'payarc-payments'));
     }
+    $refusal = Plugin::instance()->velocity()->refusal($amount > 0 ? self::money($amount) : NULL, self::INTEGRATION);
+    if ($refusal !== NULL) {
+      return $this->failure($refusal);
+    }
 
     // A new card that must be kept is saved at PayArc first and the saved
     // card charged (a token can be used only once). Gateway::saveCard() hands
@@ -504,6 +508,11 @@ final class Gateway extends \WC_Payment_Gateway {
       wc_add_notice(__('Please enter your card details.', 'payarc-payments'), 'error');
       return ['result' => 'failure', 'redirect' => wc_get_endpoint_url('payment-methods')];
     }
+    $refusal = Plugin::instance()->velocity()->refusal(NULL, self::INTEGRATION);
+    if ($refusal !== NULL) {
+      wc_add_notice($refusal, 'error');
+      return ['result' => 'failure', 'redirect' => wc_get_endpoint_url('payment-methods')];
+    }
     $user = wp_get_current_user();
     $payer = [
       'email' => $user->user_email,
@@ -711,7 +720,7 @@ final class Gateway extends \WC_Payment_Gateway {
     $order->save();
 
     $money = self::money($amount);
-    $outcome = $this->charge(static fn($client) => $client->chargeCard($cardReference, $money, ['reference' => $orderId] + $options), NULL, $order);
+    $outcome = $this->charge(static fn($client) => $client->chargeCard($cardReference, $money, ['reference' => $orderId] + $options), NULL, $order, NULL, FALSE);
     if (!empty($outcome['ambiguous'])) {
       // Leave the order pending and the attempt listed: a "failed" status
       // would make Subscriptions retry, and the charge may have gone through.
@@ -823,6 +832,10 @@ final class Gateway extends \WC_Payment_Gateway {
       return $this->failure(__('Please enter your card details.', 'payarc-payments'));
     }
     else {
+      $refusal = Plugin::instance()->velocity()->refusal(NULL, self::INTEGRATION);
+      if ($refusal !== NULL) {
+        return $this->failure($refusal);
+      }
       $options = $this->chargeOptions($subscription);
       $payer = $this->payer($subscription);
       $description = (string) ($options['description'] ?? '');
@@ -868,9 +881,17 @@ final class Gateway extends \WC_Payment_Gateway {
    * to send as 'reference' ('' without a marker). Renewals pass no $orderId
    * and keep their own per-attempt list.
    *
+   * Failures of payer-initiated calls count toward the card-testing limits;
+   * renewals pass $payer FALSE.
+   *
    * @return array{response?: array, error?: string, gateway?: string, ambiguous?: bool}
    */
-  private function charge(callable $call, ?string $orderId, ?\WC_Order $order, ?string $amount = NULL): array {
+  private function charge(callable $call, ?string $orderId, ?\WC_Order $order, ?string $amount = NULL, bool $payer = TRUE): array {
+    $failed = static function () use ($payer): void {
+      if ($payer) {
+        Plugin::instance()->velocity()->failed(self::INTEGRATION);
+      }
+    };
     try {
       $client = $this->shared()->client(self::INTEGRATION);
     }
@@ -916,6 +937,7 @@ final class Gateway extends \WC_Payment_Gateway {
     }
     catch (GatewayException $e) {
       $this->log('Gateway error: ' . $e->getMessage(), 'error');
+      $failed();
       if ($order) {
         $order->add_order_note(sprintf(__('PayArc error: %s', 'payarc-payments'), $e->getMessage()));
       }
@@ -923,6 +945,7 @@ final class Gateway extends \WC_Payment_Gateway {
     }
     catch (\InvalidArgumentException $e) {
       $this->log('Invalid request: ' . $e->getMessage(), 'error');
+      $failed();
       return ['error' => __('The payment could not be processed. Please check the card details and try again, or contact us for help.', 'payarc-payments'), 'gateway' => $e->getMessage()];
     }
     catch (BusyException $e) {
@@ -956,6 +979,7 @@ final class Gateway extends \WC_Payment_Gateway {
     if (!Shared::approved($response)) {
       $failure = Shared::failure($response);
       $this->log('Declined: ' . $failure['gateway'], 'info');
+      $failed();
       if ($order) {
         $order->add_order_note(sprintf(__('PayArc declined the card: %s', 'payarc-payments'), $failure['gateway']));
       }

@@ -225,6 +225,10 @@ final class AddOn extends \GFPaymentAddOn {
     if ($amount <= 0) {
       return $this->authorization_error(__('The payment amount could not be processed. Please contact us.', 'payarc-payments'));
     }
+    $refusal = Plugin::instance()->velocity()->refusal(self::money($amount), self::INTEGRATION);
+    if ($refusal !== NULL) {
+      return $this->authorization_error($refusal);
+    }
 
     $uniqueId = $this->submissionId($form);
     $orderId = Gateway::orderId('gf-' . (int) $form['id'] . '-' . $uniqueId);
@@ -289,6 +293,10 @@ final class AddOn extends \GFPaymentAddOn {
     $times = max(0, (int) rgars($feed, 'meta/recurringTimes'));
 
     $firstAmount = $trialEnabled ? $trialAmount : $recurring + $setupFee;
+    $refusal = Plugin::instance()->velocity()->refusal($firstAmount > 0 ? self::money($firstAmount) : NULL, self::INTEGRATION);
+    if ($refusal !== NULL) {
+      return $this->authorization_error($refusal);
+    }
     $uniqueId = $this->submissionId($form);
     $subscriptionId = 'gf-sub-' . substr($uniqueId, 0, 16);
     $orderId = Gateway::orderId('gf-' . (int) $form['id'] . '-' . $uniqueId);
@@ -639,10 +647,12 @@ final class AddOn extends \GFPaymentAddOn {
     }
     catch (GatewayException $e) {
       $this->log_error(__METHOD__ . '(): ' . $e->getMessage());
+      Plugin::instance()->velocity()->failed(self::INTEGRATION);
       return ['error' => \Payarc\DonorMessage::donorText($e->getMessage())];
     }
     catch (\InvalidArgumentException $e) {
       $this->log_error(__METHOD__ . '(): ' . $e->getMessage());
+      Plugin::instance()->velocity()->failed(self::INTEGRATION);
       return ['error' => __('The payment could not be processed. Please check the card details and try again, or contact us for help.', 'payarc-payments')];
     }
     catch (BusyException $e) {
@@ -659,6 +669,7 @@ final class AddOn extends \GFPaymentAddOn {
     if (!Gateway::approved($response)) {
       $failure = Gateway::failure($response);
       $this->log_error(__METHOD__ . '(): declined: ' . $failure['gateway']);
+      Plugin::instance()->velocity()->failed(self::INTEGRATION);
       return ['error' => $failure['donor']];
     }
     if (!empty($response['void_error'])) {

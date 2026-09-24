@@ -37,6 +37,11 @@ final class Settings {
       'google_pay' => FALSE,
       'debug_log' => FALSE,
       'accounts' => [],
+      'velocity_ip_limit' => \Payarc\VelocityGuard::DEFAULTS['ip_limit'],
+      'velocity_site_limit' => \Payarc\VelocityGuard::DEFAULTS['site_limit'],
+      'velocity_pause_minutes' => \Payarc\VelocityGuard::DEFAULTS['pause_minutes'],
+      'velocity_min_amount' => \Payarc\VelocityGuard::DEFAULTS['min_amount'],
+      'velocity_alert_email' => '',
     ];
   }
 
@@ -198,6 +203,27 @@ final class Settings {
   }
 
   /**
+   * Card-testing limits for Payarc\VelocityGuard.
+   */
+  public function velocity(): array {
+    return [
+      'ip_limit' => (int) $this->get('velocity_ip_limit'),
+      'site_limit' => (int) $this->get('velocity_site_limit'),
+      'pause_minutes' => (int) $this->get('velocity_pause_minutes'),
+      'min_amount' => (string) $this->get('velocity_min_amount'),
+    ];
+  }
+
+  /**
+   * Who is emailed when card payments pause: the setting, else the site's
+   * admin email.
+   */
+  public function velocityAlertEmail(): string {
+    $email = trim((string) $this->get('velocity_alert_email'));
+    return $email !== '' ? $email : (string) get_option('admin_email');
+  }
+
+  /**
    * Sanitize callback for register_setting().
    */
   public function sanitize(mixed $input): array {
@@ -222,6 +248,12 @@ final class Settings {
     $clean['apple_pay'] = !empty($input['apple_pay']);
     $clean['google_pay'] = !empty($input['google_pay']);
     $clean['debug_log'] = !empty($input['debug_log']);
+    $clean['velocity_ip_limit'] = max(0, (int) ($input['velocity_ip_limit'] ?? $current['velocity_ip_limit']));
+    $clean['velocity_site_limit'] = max(0, (int) ($input['velocity_site_limit'] ?? $current['velocity_site_limit']));
+    $clean['velocity_pause_minutes'] = max(1, (int) ($input['velocity_pause_minutes'] ?? $current['velocity_pause_minutes']));
+    $clean['velocity_min_amount'] = number_format(max(0, (float) ($input['velocity_min_amount'] ?? $current['velocity_min_amount'])), 2, '.', '');
+    $email = sanitize_email((string) ($input['velocity_alert_email'] ?? ''));
+    $clean['velocity_alert_email'] = is_email($email) ? $email : '';
     $clean['accounts'] = self::sanitizeAccounts($input['accounts'] ?? [], $this->extraAccounts());
 
     $this->values = $clean;

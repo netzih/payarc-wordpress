@@ -145,8 +145,17 @@ final class Gateway {
     return ($prefix !== '' ? $prefix . '-' : '') . $id;
   }
 
+  /**
+   * The payer's address, as recorded on charges and counted by the
+   * card-testing limits. REMOTE_ADDR by default; a site behind a proxy that
+   * does not restore it (e.g. Cloudflare without its real-IP module) must
+   * supply the forwarded address, or every payer counts as the proxy:
+   *
+   *   add_filter('payarc_payments_client_ip', fn($ip) => $_SERVER['HTTP_CF_CONNECTING_IP'] ?? $ip);
+   */
   public function clientIp(): string {
     $ip = isset($_SERVER['REMOTE_ADDR']) ? sanitize_text_field(wp_unslash((string) $_SERVER['REMOTE_ADDR'])) : '';
+    $ip = (string) apply_filters('payarc_payments_client_ip', $ip);
     return filter_var($ip, FILTER_VALIDATE_IP) ? $ip : '';
   }
 

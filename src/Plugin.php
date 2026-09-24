@@ -11,7 +11,7 @@ use Payarc\DonorMessage;
  */
 final class Plugin {
 
-  public const VERSION = '0.1.2';
+  public const VERSION = '0.1.3';
 
   public const SLUG = 'payarc-payments';
 
@@ -22,6 +22,8 @@ final class Plugin {
   private Settings $settings;
 
   private Gateway $gateway;
+
+  private Velocity $velocity;
 
   public static function boot(string $file): void {
     if (self::$instance) {
@@ -42,7 +44,7 @@ final class Plugin {
     $this->file = $file;
     $this->settings = new Settings();
     $this->gateway = new Gateway($this->settings);
-
+    $this->velocity = new Velocity($this->settings, $this->gateway);
   }
 
   private function hooks(): void {
@@ -230,6 +232,15 @@ final class Plugin {
 
   public function gateway(): Gateway {
     return $this->gateway;
+  }
+
+  /**
+   * Card-testing protection. Another plugin that charges payer tokens through
+   * this one asks refusal() before each charge and calls failed() after each
+   * decline.
+   */
+  public function velocity(): Velocity {
+    return $this->velocity;
   }
 
   public function file(): string {

@@ -32,6 +32,7 @@ final class SettingsPage {
     add_action('admin_post_payarc_check_credentials', [$this, 'checkCredentials']);
     add_action('admin_post_payarc_check_marker', [$this, 'checkMarker']);
     add_action('admin_post_payarc_run_renewals', [$this, 'runRenewals']);
+    add_action('admin_post_payarc_velocity_resume', [$this, 'resumePayments']);
     add_action('admin_notices', [$this, 'showNotice']);
     add_filter('plugin_action_links_' . plugin_basename(\Payarc\WordPress\Plugin::instance()->file()), [$this, 'actionLinks']);
   }
@@ -131,6 +132,8 @@ final class SettingsPage {
           </tr>
         </table>
 
+        <?php $this->renderVelocity($v); ?>
+
         <p class="submit">
           <?php submit_button(NULL, 'primary', 'submit', FALSE); ?>
           <a class="button" href="<?php echo esc_url($checkUrl); ?>" style="margin-left:8px"><?php esc_html_e('Check credentials', 'payarc-payments'); ?></a>
@@ -187,6 +190,68 @@ final class SettingsPage {
         <?php endforeach; ?>
       </table>
     <?php endforeach;
+  }
+
+  /**
+   * Card-testing limits, and the pause with a resume button when one is on.
+   */
+  private function renderVelocity(array $v): void {
+    $name = static fn(string $key) => esc_attr(Settings::OPTION . '[' . $key . ']');
+    $guard = \Payarc\WordPress\Plugin::instance()->velocity()->guard();
+    $until = $guard->pausedUntil();
+    ?>
+    <h2 id="payarc-velocity"><?php esc_html_e('Card-testing protection', 'payarc-payments'); ?></h2>
+    <p class="description"><?php esc_html_e('Bots test stolen cards by running many small payments through a form, most of them declined. These limits count declined and refused payments made by payers (renewals are not counted or blocked) over the last 60 minutes. Administrators who are logged in are never blocked. Set a limit to 0 to turn it off.', 'payarc-payments'); ?></p>
+    <?php if ($until !== NULL) :
+      $resumeUrl = wp_nonce_url(admin_url('admin-post.php?action=payarc_velocity_resume'), 'payarc_velocity_resume');
+      ?>
+      <div class="notice notice-error inline"><p>
+        <strong><?php echo esc_html(sprintf(__('Card payments are paused until %s', 'payarc-payments'), wp_date(get_option('date_format') . ' ' . get_option('time_format'), $until))); ?></strong>
+        <?php esc_html_e('because too many payments were declined. Payers are asked to try again later.', 'payarc-payments'); ?>
+        <a class="button button-small" style="margin-left:8px" href="<?php echo esc_url($resumeUrl); ?>"><?php esc_html_e('Resume card payments now', 'payarc-payments'); ?></a>
+      </p></div>
+    <?php else : ?>
+      <p><?php echo esc_html(sprintf(__('Status: card payments are open. Declines in the last 60 minutes: %d.', 'payarc-payments'), $guard->siteFailures())); ?></p>
+    <?php endif; ?>
+    <table class="form-table" role="presentation">
+      <tr>
+        <th scope="row"><label for="payarc-velocity-ip"><?php esc_html_e('Declines per IP address', 'payarc-payments'); ?></label></th>
+        <td><input id="payarc-velocity-ip" class="small-text" type="number" min="0" step="1" name="<?php echo $name('velocity_ip_limit'); ?>" value="<?php echo esc_attr((string) $v['velocity_ip_limit']); ?>">
+          <p class="description"><?php esc_html_e('After this many, that address is refused until an hour has passed since its first decline.', 'payarc-payments'); ?></p></td>
+      </tr>
+      <tr>
+        <th scope="row"><label for="payarc-velocity-site"><?php esc_html_e('Declines site-wide', 'payarc-payments'); ?></label></th>
+        <td><input id="payarc-velocity-site" class="small-text" type="number" min="0" step="1" name="<?php echo $name('velocity_site_limit'); ?>" value="<?php echo esc_attr((string) $v['velocity_site_limit']); ?>">
+          <?php esc_html_e('then pause card payments for', 'payarc-payments'); ?>
+          <input class="small-text" type="number" min="1" step="1" name="<?php echo $name('velocity_pause_minutes'); ?>" value="<?php echo esc_attr((string) $v['velocity_pause_minutes']); ?>"> <?php esc_html_e('minutes', 'payarc-payments'); ?>
+          <p class="description"><?php esc_html_e('Attacks rotate IP addresses, so this is the limit that stops them. Raise it if a busy event could bring this many genuine declines in an hour.', 'payarc-payments'); ?></p></td>
+      </tr>
+      <tr>
+        <th scope="row"><label for="payarc-velocity-email"><?php esc_html_e('Alert email', 'payarc-payments'); ?></label></th>
+        <td><input id="payarc-velocity-email" class="regular-text" type="email" name="<?php echo $name('velocity_alert_email'); ?>" value="<?php echo esc_attr((string) $v['velocity_alert_email']); ?>" placeholder="<?php echo esc_attr((string) get_option('admin_email')); ?>">
+          <p class="description"><?php esc_html_e('Emailed once each time card payments pause. Blank uses the site admin email.', 'payarc-payments'); ?></p></td>
+      </tr>
+      <tr>
+        <th scope="row"><label for="payarc-velocity-min"><?php esc_html_e('Minimum card payment', 'payarc-payments'); ?></label></th>
+        <td><input id="payarc-velocity-min" class="small-text" type="number" min="0" step="0.01" name="<?php echo $name('velocity_min_amount'); ?>" value="<?php echo esc_attr((string) $v['velocity_min_amount']); ?>">
+          <p class="description"><?php esc_html_e('Payments below this amount are refused (card testers use small amounts). 0 allows any amount. Saving a card for a free trial is not affected.', 'payarc-payments'); ?></p></td>
+      </tr>
+    </table>
+    <?php
+  }
+
+  /**
+   * Lift a card-testing pause.
+   */
+  public function resumePayments(): void {
+    if (!current_user_can('manage_options')) {
+      wp_die(esc_html__('You do not have permission to do that.', 'payarc-payments'));
+    }
+    check_admin_referer('payarc_velocity_resume');
+    \Payarc\WordPress\Plugin::instance()->velocity()->guard()->resume();
+    set_transient(self::NOTICE_TRANSIENT . '_' . get_current_user_id(), ['ok' => TRUE, 'messages' => [__('Card payments resumed.', 'payarc-payments')]], 120);
+    wp_safe_redirect(admin_url('options-general.php?page=' . self::PAGE . '#payarc-velocity'));
+    exit;
   }
 
   /**

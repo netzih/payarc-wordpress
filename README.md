@@ -139,6 +139,45 @@ ignores it: before 0.1.2 its `html, body { overflow: hidden }` also applied
 to the page, and pages with the card form could not be scrolled with the
 mouse wheel or by touch.
 
+## Card-testing protection
+
+Card testers run stolen cards through a checkout, one small charge after
+another, and most of them are declined. The old USAePay store took 1,199
+declines in one day this way. Settings > PayArc > **Card-testing
+protection** limits this for every module (Gravity Forms, GiveWP,
+WooCommerce):
+
+- **Declines per IP address** (default 5 in 60 minutes). After that, the
+  address is refused until an hour has passed since its first decline.
+- **Declines site-wide** (default 20 in 60 minutes). After that, card
+  payments pause (default 60 minutes) and the **alert email** (default: the
+  site admin email) gets one message. Attacks rotate addresses, so this is
+  the limit that stops them. The settings page shows the pause and has
+  **Resume card payments now**.
+- **Minimum card payment** (default off).
+
+What counts and who is affected:
+- Declines, and PayArc's refusals of a token or card, count. Unclear answers
+  (the charge may have gone through) do not.
+- Payers see only "try again later" wording, never the limits.
+- Renewals are never counted or blocked.
+- Logged-in administrators (`manage_options`) are never counted or blocked
+  (filter `payarc_payments_velocity_exempt`).
+- The state lives in transients (`payarc_vg_*`).
+
+**Behind a proxy:** the IP address is `REMOTE_ADDR`. On a site behind
+Cloudflare or another proxy that does not restore the visitor's address,
+every payer would share the proxy's address. Return the forwarded address
+with the `payarc_payments_client_ip` filter (see `Gateway::clientIp()`), or
+set the per-IP limit to 0.
+
+Another plugin that charges payer tokens through this one should call
+`Plugin::instance()->velocity()->refusal($amount, $label)` before each
+charge and `->failed($label)` after each decline.
+
+These limits complement a CAPTCHA or Turnstile on the form; they do not
+replace one.
+
 ## Gravity Forms
 
 - Add the **PayArc Card** field (Pricing Fields) and a **PayArc** feed.
@@ -191,6 +230,7 @@ Sandbox, local site, 2026-09-24:
 | GiveWP | One-time and monthly donations; renewal; refund voided; a repeated refund call recognised without sending again |
 | WooCommerce | Block and classic checkout; logged-in subscription checkout that saves a token; WooCommerce Subscriptions renewal; partial refund refused, full refund voided |
 | Admin | Check credentials (bearer token and Client ID); Unresolved requests, including "Check at PayArc" |
+| Card-testing protection | Gravity Forms: per-IP refusal after the limit while other addresses still pay; site-wide pause tripped from three addresses, with alert email; payments refused during the pause; Resume button, then approved. GiveWP and WooCommerce (block and classic checkout): refused during a pause. Logged-in administrator exempt |
 
 Also verified: after a refused tokenization the payer can correct the field
 and submit again, and each tokenization of a session returns a new token.

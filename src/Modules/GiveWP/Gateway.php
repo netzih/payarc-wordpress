@@ -113,6 +113,7 @@ final class Gateway extends PaymentGateway implements PaymentGatewayRefundable {
     $orderId = Shared::orderId('give-' . $donation->id);
     $options = $this->chargeOptions($donation, 'GIVE-' . $donation->id);
     $amount = $donation->amount->formatToDecimal();
+    $this->assertNotRefused($amount);
 
     $response = $this->charge(static fn($client, $reference) => $client->chargeToken($key, $amount, ['reference' => $reference] + $options), $orderId, $donation, $amount);
     $reference = Shared::transactionReference($response);
@@ -190,6 +191,7 @@ final class Gateway extends PaymentGateway implements PaymentGatewayRefundable {
     $orderId = Shared::orderId('give-' . $donation->id);
     $options = $this->chargeOptions($donation, 'GIVE-' . $donation->id);
     $amount = $donation->amount->formatToDecimal();
+    $this->assertNotRefused($amount);
     $payer = $this->payer($donation);
     $description = (string) ($donation->formTitle ?: __('Donation', 'payarc-payments'));
 
@@ -321,10 +323,12 @@ final class Gateway extends PaymentGateway implements PaymentGatewayRefundable {
     }
     catch (GatewayException $e) {
       Log::error('GiveWP: gateway error', ['donation' => $donation->id, 'error' => $e->getMessage()]);
+      Plugin::instance()->velocity()->failed(self::INTEGRATION);
       throw new PaymentGatewayException(DonorMessage::donorText($e->getMessage()));
     }
     catch (\InvalidArgumentException $e) {
       Log::error('GiveWP: invalid request', ['donation' => $donation->id, 'error' => $e->getMessage()]);
+      Plugin::instance()->velocity()->failed(self::INTEGRATION);
       throw new PaymentGatewayException(__('The payment could not be processed. Please check the card details and try again, or contact us for help.', 'payarc-payments'));
     }
     catch (BusyException $e) {
@@ -341,6 +345,7 @@ final class Gateway extends PaymentGateway implements PaymentGatewayRefundable {
       $failure = Shared::failure($response);
       Log::error('GiveWP: declined', ['donation' => $donation->id, 'gateway' => $failure['gateway']]);
       DonationNote::create(['donationId' => $donation->id, 'content' => sprintf(__('PayArc declined the card: %s', 'payarc-payments'), $failure['gateway'])]);
+      Plugin::instance()->velocity()->failed(self::INTEGRATION);
       throw new PaymentGatewayException($failure['donor']);
     }
     if (!empty($response['void_error'])) {
@@ -349,6 +354,16 @@ final class Gateway extends PaymentGateway implements PaymentGatewayRefundable {
       DonationNote::create(['donationId' => $donation->id, 'content' => sprintf(__('PayArc saved the card but did not void the $%1$s verification hold (%2$s). The hold expires on its own after seven days.', 'payarc-payments'), \Payarc\GatewayClient::CARD_VERIFICATION_AMOUNT, $response['void_error'])]);
     }
     return $response;
+  }
+
+  /**
+   * Refuse the payment when the card-testing limits say so.
+   */
+  private function assertNotRefused(string $amount): void {
+    $refusal = Plugin::instance()->velocity()->refusal($amount, self::INTEGRATION);
+    if ($refusal !== NULL) {
+      throw new PaymentGatewayException($refusal);
+    }
   }
 
   public function payer(Donation $donation): array {
