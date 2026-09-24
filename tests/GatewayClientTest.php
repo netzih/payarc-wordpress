@@ -368,6 +368,18 @@ final class GatewayClientTest extends TestCase {
     self::assertCount(1, $this->requests);
   }
 
+  public function testFindChargeByReferenceUsesOnlyClockSlackForUnixTimes(): void {
+    $sent = 1790224000;
+    $rows = [];
+    for ($i = 0; $i < 100; $i++) {
+      $rows[] = $this->charge(['id' => 'C' . $i, 'created_at' => $sent - GatewayClient::CLOCK_SLACK - 60 - $i, 'metadata' => ['reference' => 'x']]);
+    }
+    $this->queue(200, $this->page($rows, 50));
+
+    self::assertNull($this->client()->findChargeByReference('r-1', $sent));
+    self::assertCount(1, $this->requests);
+  }
+
   public function testFindChargeByReferenceIsInconclusiveWhenPagesRunOut(): void {
     $now = time();
     $rows = array_fill(0, 100, $this->charge(['created_at' => $now, 'metadata' => ['reference' => 'x']]));
