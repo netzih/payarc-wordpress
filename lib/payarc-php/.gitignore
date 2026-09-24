@@ -1,0 +1,4 @@
+/vendor/
+/.phpunit.cache/
+/tests/sandbox/reports/
+.DS_Store
