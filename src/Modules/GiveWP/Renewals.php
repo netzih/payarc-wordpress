@@ -8,12 +8,14 @@ use Give\Subscriptions\Models\Subscription;
 use Give\Subscriptions\Models\SubscriptionNote;
 use Give\Subscriptions\ValueObjects\SubscriptionStatus;
 use Payarc\AmbiguousGatewayException;
+use Payarc\Charge;
 use Payarc\GatewayException;
 use Payarc\ReconciliationInconclusiveException;
 use Payarc\WordPress\Gateway as Shared;
 use Payarc\WordPress\Lock;
 use Payarc\WordPress\Log;
 use Payarc\WordPress\Plugin;
+use Payarc\WordPress\Reconcile;
 
 /**
  * Charges due GiveWP recurring donations against the saved-card reference
@@ -25,9 +27,11 @@ use Payarc\WordPress\Plugin;
  * ahead, up to MAX_ATTEMPTS, then Cancelled. Attempt counts live in one
  * option keyed by subscription id (GiveWP has no subscription meta table).
  *
- * The orderid of every charge is written to that state (with the time) BEFORE
- * the charge is sent and cleared only once the outcome is recorded, so a run
- * that finds it looks the charge up before sending another one.
+ * The orderid of every charge (sent as PayArc's Idempotency-Key) is written to
+ * that state (with the time) BEFORE the charge is sent and cleared only once
+ * the outcome is recorded. A run that finds it sends the same key again while
+ * PayArc holds it, getting the earlier result back, and looks the charge up
+ * by it after that, before sending another one.
  */
 final class Renewals {
 
@@ -115,12 +119,18 @@ final class Renewals {
 
       try {
         $client = Plugin::instance()->gateway()->client(Gateway::INTEGRATION, Gateway::mode());
+        $cardReference = (string) $subscription->gatewaySubscriptionId;
+        $options = $this->chargeOptions($subscription);
         if ($pendingOrderId !== '') {
           // A previous run sent this charge and never recorded the answer.
-          // Find out what happened before sending another one; an unanswered
-          // lookup keeps the marker and ends this run without a charge.
-          $response = $this->findTransaction($client, $pendingOrderId, $pendingSentAt ?: NULL, $amount);
-          $earlierKey = $response ? Shared::transactionReference($response) : '';
+          // While PayArc holds the key, sending it again returns the earlier
+          // result (or makes the charge if it never arrived); after that the
+          // charge is looked up. An unanswered lookup keeps the marker and
+          // ends this run without a charge.
+          $response = $pendingSentAt >= time() - Reconcile::REPLAY_WINDOW
+            ? $this->send($client, $cardReference, $amount, ['reference' => $pendingOrderId] + $options)
+            : $this->findCharge($client, $pendingOrderId, $pendingSentAt ?: NULL, $amount);
+          $earlierKey = $response && Shared::approved($response) ? Shared::transactionReference($response) : '';
           $recorded = $earlierKey !== '' ? give()->donations->getByGatewayTransactionId($earlierKey) : NULL;
           if ($recorded) {
             $outcome = $this->finishRecorded($subscription, $recorded, $pendingOrderId);
@@ -135,7 +145,7 @@ final class Renewals {
           }
           else {
             if ($response === NULL) {
-              $note = sprintf(__('PayArc has no record of the earlier charge %s; charging now.', 'payarc-payments'), $pendingOrderId);
+              $note = sprintf(__('PayArc has no approved charge for %s; charging now.', 'payarc-payments'), $pendingOrderId);
             }
             elseif (Shared::approved($response)) {
               $note = sprintf(__('PayArc confirms the earlier charge %s was processed; recorded without charging again.', 'payarc-payments'), $pendingOrderId);
@@ -153,30 +163,8 @@ final class Renewals {
         $orderId = Shared::orderId(sprintf('give-sub-%d-%s-%d', $id, $installment, $attempt));
 
         if ($response === NULL) {
-          $initial = $subscription->initialDonation();
-          $payer = $initial ? [
-            'email' => (string) $initial->email,
-            'first_name' => (string) $initial->firstName,
-            'last_name' => (string) $initial->lastName,
-            'phone' => (string) $initial->phone,
-            'address' => (string) ($initial->billingAddress->address1 ?? ''),
-            'address2' => (string) ($initial->billingAddress->address2 ?? ''),
-            'city' => (string) ($initial->billingAddress->city ?? ''),
-            'state' => (string) ($initial->billingAddress->state ?? ''),
-            'postcode' => (string) ($initial->billingAddress->zip ?? ''),
-            'country' => (string) ($initial->billingAddress->country ?? ''),
-          ] : [];
-          $currency = 'USD';
-          try {
-            $currency = (string) $subscription->amount->getCurrency()->getCode();
-          }
-          catch (\Throwable $e) {
-            // keep USD
-          }
-          $metadata = Plugin::instance()->gateway()->metadata('GIVE-S' . $id, (string) ($initial ? $initial->formTitle : __('Recurring donation', 'payarc-payments')), $payer, ['currency' => $currency, 'orderid' => $orderId]);
-          unset($metadata['clientip']);
           $this->setMarker($id, $orderId);
-          $response = $client->saleWithCardReference((string) $subscription->gatewaySubscriptionId, $amount, $metadata);
+          $response = $this->send($client, $cardReference, $amount, ['reference' => $orderId] + $options);
         }
       }
       catch (ReconciliationInconclusiveException $e) {
@@ -185,28 +173,19 @@ final class Renewals {
         return 'ambiguous';
       }
       catch (AmbiguousGatewayException $e) {
+        // The marker stays: the next run sends the same key again.
         Log::error('GiveWP renewal ambiguous', ['subscription' => $id, 'error' => $e->getMessage()]);
-        try {
-          $found = $this->findTransaction($client, $orderId, time(), $amount);
-        }
-        catch (ReconciliationInconclusiveException $lookup) {
-          $found = NULL;
-        }
-        if (!$found) {
-          // The marker stays: the next run reconciles before any retry.
-          SubscriptionNote::create(['subscriptionId' => $id, 'content' => sprintf(__('PayArc did not answer when charging the renewal due %1$s (attempt %2$d). It will be checked again next hour before any retry.', 'payarc-payments'), $installment, $attempt + 1)]);
-          return 'ambiguous';
-        }
-        $response = $found;
+        SubscriptionNote::create(['subscriptionId' => $id, 'content' => sprintf(__('PayArc did not give a clear answer when charging the renewal due %1$s (attempt %2$d). It will be checked again next hour before any retry.', 'payarc-payments'), $installment, $attempt + 1)]);
+        return 'ambiguous';
       }
       catch (GatewayException $e) {
-        // The gateway answered: nothing was charged.
+        // PayArc answered: nothing was charged.
         $this->clearMarker($id);
-        $response = ['result_code' => 'E', 'error' => $e->getMessage()] + $e->getResponseData();
+        $response = ['failure_code' => 'ERROR', 'failure_message' => $e->getMessage()] + $e->getResponseData();
       }
       catch (\Throwable $e) {
         // Misconfiguration or a coding error must not kill the whole cron run.
-        // A marker already written stays, so the next run looks it up first.
+        // A marker already written stays, so the next run settles it first.
         Log::error('GiveWP renewal skipped', ['subscription' => $id, 'error' => $e->getMessage()]);
         SubscriptionNote::create(['subscriptionId' => $id, 'content' => sprintf(__('PayArc renewal skipped: %s', 'payarc-payments'), $e->getMessage())]);
         return 'skipped';
@@ -347,24 +326,64 @@ final class Renewals {
   }
 
   /**
-   * The listed transaction carrying this orderid (approved or declined), or
-   * NULL when PayArc provably has none.
+   * Options for a renewal charge, from the subscription's first donation.
+   */
+  private function chargeOptions(Subscription $subscription): array {
+    $initial = $subscription->initialDonation();
+    $payer = $initial ? [
+      'email' => (string) $initial->email,
+      'first_name' => (string) $initial->firstName,
+      'last_name' => (string) $initial->lastName,
+      'phone' => (string) $initial->phone,
+      'address' => (string) ($initial->billingAddress->address1 ?? ''),
+      'address2' => (string) ($initial->billingAddress->address2 ?? ''),
+      'city' => (string) ($initial->billingAddress->city ?? ''),
+      'state' => (string) ($initial->billingAddress->state ?? ''),
+      'postcode' => (string) ($initial->billingAddress->zip ?? ''),
+      'country' => (string) ($initial->billingAddress->country ?? ''),
+    ] : [];
+    $options = Plugin::instance()->gateway()->chargeOptions('GIVE-S' . (int) $subscription->id, (string) ($initial ? $initial->formTitle : __('Recurring donation', 'payarc-payments')), $payer, ['recurring' => TRUE]);
+    // Renewals run without a browser; the request's IP would be misleading.
+    unset($options['metadata']['client_ip']);
+    return $options;
+  }
+
+  /**
+   * Charge the saved card; resend once with the same key if the answer was
+   * lost. An answer that does not say whether the card was charged is
+   * ambiguous; a partial approval is voided and treated as a decline.
+   *
+   * @throws AmbiguousGatewayException
+   * @throws GatewayException
+   */
+  private function send(\Payarc\GatewayClient $client, string $cardReference, string $amount, array $options): array {
+    try {
+      $response = $client->chargeCard($cardReference, $amount, $options);
+    }
+    catch (AmbiguousGatewayException $e) {
+      $response = $client->chargeCard($cardReference, $amount, $options);
+    }
+    $outcome = Charge::outcome($response);
+    if ($outcome === Charge::PARTIAL) {
+      $client->void(Charge::id($response), 'other', 'Partially approved');
+      return ['failure_code' => 'PARTIAL', 'failure_message' => __('Only part of the amount was approved, so the charge was voided.', 'payarc-payments')] + $response;
+    }
+    if (!in_array($outcome, [Charge::APPROVED, Charge::DECLINED], TRUE)) {
+      throw new AmbiguousGatewayException(sprintf('PayArc answered with status "%s".', (string) ($response['status'] ?? '')), 0, $response);
+    }
+    return $response;
+  }
+
+  /**
+   * The approved charge sent with this reference, or NULL when PayArc
+   * provably has none.
    *
    * @throws \Payarc\ReconciliationInconclusiveException
-   *   When the answer is unknown: the listing window ran out or the lookup
-   *   itself failed. Callers must not charge.
+   *   When the answer is unknown. Callers must not charge.
    */
-  private function findTransaction(\Payarc\GatewayClient $client, string $orderId, ?int $sentAt, string $amount): ?array {
-    try {
-      return $client->findTransactionByOrderId($orderId, $sentAt, 5, $amount);
-    }
-    catch (ReconciliationInconclusiveException $e) {
-      throw $e;
-    }
-    catch (\Throwable $lookup) {
-      Log::error('GiveWP renewal reconciliation failed', ['error' => $lookup->getMessage()]);
-      throw new ReconciliationInconclusiveException('The lookup for ' . $orderId . ' failed: ' . $lookup->getMessage(), 0, [], $lookup);
-    }
+  private function findCharge(\Payarc\GatewayClient $client, string $orderId, ?int $sentAt, string $amount): ?array {
+    $found = Reconcile::lookup($client, $orderId, $sentAt, $amount);
+    return $found && Shared::approved($found) ? $found : NULL;
   }
 
   /**

@@ -1,20 +1,19 @@
 /* global PayarcHostedFields, React */
 /**
  * GiveWP visual donation form gateway. Registers with window.givewp.gateways:
- * Fields() mounts the Pay.js hosted card fields, beforeCreatePayment()
- * tokenizes them into a single-use payment key posted as
- * gatewayData[payarcPaymentKey].
+ * Fields() mounts the PayArc Hosted Fields, beforeCreatePayment() tokenizes
+ * them into a single-use card token posted as gatewayData[payarcToken].
  */
 (function (window) {
   'use strict';
 
   var h = React.createElement;
   var settings = {};
-  var mounted = null;   // {client, cardEntry}
+  var mounted = null;   // PayarcHostedFields handles
   var mountPromise = null;
   var CONTAINER_ID = 'payarc-givewp-card';
   var ERRORS_ID = 'payarc-givewp-errors';
-  var APPLE_ID = 'payarc-givewp-apple-pay';
+  var WALLETS_ID = 'payarc-givewp-wallets';
 
   function t(key, fallback) {
     return (settings.i18n && settings.i18n[key]) || fallback;
@@ -37,8 +36,8 @@
     }
     container.dataset.payarcMounted = '1';
     mountPromise = PayarcHostedFields.mount({
-      publicKey: settings.publicKey,
-      payJsUrl: settings.payJsUrl,
+      clientId: settings.clientId,
+      scriptUrl: settings.scriptUrl,
       container: container,
       onFieldError: showError
     }).then(function (result) {
@@ -58,33 +57,33 @@
     var isRecurring = !!formData.isRecurring;
     var amount = Number(formData.amount || 0);
     var context = hooks.useFormContext();
-    var applePayRef = React.useRef(null);
+    var walletsRef = React.useRef(null);
+    var wallets = settings.wallets || [];
 
     React.useEffect(function () {
       if (!settings.configured) {
         showError(t('notConfigured', 'The payment form is not configured.'));
         return;
       }
-      mount().then(function (result) {
-        if (!settings.applePay || !settings.applePay.enabled || applePayRef.current) {
+      mount().then(function () {
+        if (!wallets.length || walletsRef.current) {
           return;
         }
-        PayarcHostedFields.applePay({
-          client: result.client,
-          targetDiv: APPLE_ID + '-button',
-          displayName: settings.applePay.displayName,
-          countryCode: settings.applePay.countryCode,
-          currencyCode: formData.currency || 'USD',
-          buttonType: 'donate',
+        var wrapper = document.getElementById(WALLETS_ID);
+        PayarcHostedFields.wallets({
+          clientId: settings.clientId,
+          scriptUrl: settings.scriptUrl,
+          targetDiv: wrapper && wrapper.querySelector('.payarc-wallet-buttons'),
+          wallets: wallets,
           getAmount: function () {
             var el = document.getElementById(CONTAINER_ID);
             var current = Number(el && el.dataset.amount ? el.dataset.amount : 0);
             return current > 0 ? current.toFixed(2) : '0.00';
           },
-          onKey: function (key) {
+          onKey: function (token) {
             var el = document.getElementById(CONTAINER_ID);
             if (el) {
-              el.dataset.applePayKey = key;
+              el.dataset.walletToken = token;
             }
             var form = el && el.closest('form');
             if (form && form.requestSubmit) {
@@ -93,27 +92,26 @@
           },
           onError: showError,
           onCancel: function () { showError(''); }
-        }).then(function (entry) {
-          applePayRef.current = entry;
-          var wrapper = document.getElementById(APPLE_ID);
-          if (wrapper && entry) {
+        }).then(function (row) {
+          walletsRef.current = row;
+          if (wrapper && row) {
             wrapper.hidden = false;
           }
         });
       }).catch(function () { /* shown inline */ });
       return function () {
         mounted = null;
-        applePayRef.current = null;
+        walletsRef.current = null;
       };
     }, []);
 
-    // Apple Pay is single-use: hide it for recurring gifts.
-    var applePayHidden = isRecurring || !settings.applePay || !settings.applePay.enabled;
+    // Wallet tokens cannot be saved: hide the buttons for recurring gifts.
+    var walletsHidden = isRecurring || !wallets.length;
 
     return h('div', { className: 'payarc-givewp-fields' },
-      h('div', { id: APPLE_ID, className: 'payarc-apple-pay', hidden: true, style: applePayHidden ? { display: 'none' } : undefined },
-        h('div', { id: APPLE_ID + '-button', className: 'payarc-apple-pay-button' }),
-        h('div', { className: 'payarc-apple-pay-divider' }, h('span', null, t('orCard', 'or enter card details')))
+      h('div', { id: WALLETS_ID, className: 'payarc-wallets-wrapper', hidden: true, style: walletsHidden ? { display: 'none' } : undefined },
+        h('div', { className: 'payarc-wallet-buttons' }),
+        h('div', { className: 'payarc-wallet-divider' }, h('span', null, t('orCard', 'or enter card details')))
       ),
       h('div', { id: CONTAINER_ID, className: 'payarc-card-element', 'data-amount': amount, 'aria-label': 'Secure card details' }),
       h('div', { id: ERRORS_ID, className: 'payarc-card-errors', role: 'alert', 'aria-live': 'polite' }),
@@ -133,15 +131,15 @@
         throw new Error(t('notConfigured', 'The payment form is not configured.'));
       }
       var pending = document.getElementById(CONTAINER_ID);
-      var applePayKey = pending && pending.dataset.applePayKey;
-      if (applePayKey) {
-        pending.dataset.applePayKey = '';
-        return { payarcPaymentKey: applePayKey };
+      var walletToken = pending && pending.dataset.walletToken;
+      if (walletToken) {
+        pending.dataset.walletToken = '';
+        return { payarcToken: walletToken };
       }
       var handles = await mount();
-      var key = await PayarcHostedFields.tokenize(handles);
+      var token = await PayarcHostedFields.tokenize(handles);
       showError('');
-      return { payarcPaymentKey: key };
+      return { payarcToken: token };
     }
   };
 

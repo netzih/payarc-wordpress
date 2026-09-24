@@ -25,10 +25,11 @@ use Payarc\WordPress\Log;
 use Payarc\WordPress\Plugin;
 
 /**
- * GiveWP gateway (visual donation forms, v3). One-time gifts charge the Pay.js
- * key in createPayment(); recurring gifts charge the first installment with
- * save_card and store the saved-card reference as the gateway subscription
- * id, which the renewal worker charges on each renewsAt date.
+ * GiveWP gateway (visual donation forms, v3). One-time gifts charge the
+ * Hosted Fields token in createPayment(); recurring gifts save the card at
+ * PayArc, charge the first installment to it and store the saved-card
+ * reference as the gateway subscription id, which the renewal worker charges
+ * on each renewsAt date.
  *
  * GiveWP's own Test Mode selects the sandbox credentials from
  * Settings > PayArc; live mode selects the live ones.
@@ -82,20 +83,16 @@ final class Gateway extends PaymentGateway implements PaymentGatewayRefundable {
     $mode = self::mode();
     return [
       'label' => $this->getPaymentMethodLabel(),
-      'publicKey' => $settings->publicKey($mode),
-      'payJsUrl' => $settings->payJsUrl($mode),
+      'clientId' => $settings->clientId($mode),
+      'scriptUrl' => $settings->hostedFieldsUrl($mode),
       'configured' => $settings->isConfigured($mode),
       'sandbox' => $mode === 'sandbox',
-      'applePay' => [
-        'enabled' => $settings->applePayEnabled(),
-        'displayName' => $settings->applePayDisplayName(),
-        'countryCode' => 'US',
-      ],
+      'wallets' => $settings->wallets(),
       'i18n' => [
         'notConfigured' => __('The payment form is not configured correctly, so no charge was made. Please contact us.', 'payarc-payments'),
         'secureNote' => __('Card details are entered securely in a form hosted by PayArc.', 'payarc-payments'),
         'orCard' => __('or enter card details', 'payarc-payments'),
-        'sandboxNote' => __('Sandbox mode: use test card 4000100011112224.', 'payarc-payments'),
+        'sandboxNote' => __('Sandbox mode: use test card 4012 0000 9876 5439, 12/29, CVV 999, ZIP 85284.', 'payarc-payments'),
       ],
     ];
   }
@@ -106,18 +103,18 @@ final class Gateway extends PaymentGateway implements PaymentGatewayRefundable {
 
   /**
    * @param array $gatewayData
-   *   'payarcPaymentKey' from beforeCreatePayment().
+   *   'payarcToken' from beforeCreatePayment().
    */
   public function createPayment(Donation $donation, $gatewayData): GatewayCommand {
-    $key = trim((string) ($gatewayData['payarcPaymentKey'] ?? ''));
+    $key = trim((string) ($gatewayData['payarcToken'] ?? ''));
     if ($key === '') {
       throw new PaymentGatewayException(__('Please enter your card details.', 'payarc-payments'));
     }
     $orderId = Shared::orderId('give-' . $donation->id);
-    $metadata = $this->metadata($donation, 'GIVE-' . $donation->id, $orderId);
+    $options = $this->chargeOptions($donation, 'GIVE-' . $donation->id);
     $amount = $donation->amount->formatToDecimal();
 
-    $response = $this->charge(static fn($client) => $client->saleWithPaymentKey($key, $amount, $metadata), $orderId, $donation, $amount);
+    $response = $this->charge(static fn($client, $reference) => $client->chargeToken($key, $amount, ['reference' => $reference] + $options), $orderId, $donation, $amount);
     $reference = Shared::transactionReference($response);
     $command = new PaymentComplete($reference);
     $command->setPaymentNotes($this->gatewayNote($response));
@@ -133,36 +130,31 @@ final class Gateway extends PaymentGateway implements PaymentGatewayRefundable {
     $mode = isset($donation->mode) && method_exists($donation->mode, 'isLive') ? ($donation->mode->isLive() ? 'live' : 'sandbox') : self::mode();
     try {
       $client = $this->shared()->client(self::INTEGRATION, $mode);
-      $transaction = $client->getTransaction($reference);
-      $status = (string) ($transaction['status_code'] ?? '');
-      if ($status === 'P' || $status === 'A') {
-        $response = $client->void($reference);
-        $verb = __('voided before settlement', 'payarc-payments');
-      }
-      else {
-        $verb = __('refunded', 'payarc-payments');
-        // Refunds inherit the sale's orderid at PayArc. A marker in the
-        // donation meta makes sure a refund whose answer was lost is found,
-        // not repeated. It is never cleared on success: GiveWP records the
-        // refund after this returns, and a second call simply finds it again.
-        $saleOrderId = trim((string) ($transaction['orderid'] ?? ''));
-        $amount = $donation->amount->formatToDecimal();
-        if ($saleOrderId === '') {
-          $response = $client->refund($reference);
-        }
-        else {
-          $donationId = (int) $donation->id;
-          [$read, $write] = Reconcile::metaStore(
-            static fn() => give_get_meta($donationId, '_payarc_refund_sent', TRUE),
-            static function (array $marker) use ($donationId): void { give_update_meta($donationId, '_payarc_refund_sent', $marker); },
-            static function () use ($donationId): void { give_delete_meta($donationId, '_payarc_refund_sent'); }
-          );
-          $result = Reconcile::once($client, $read, $write, $saleOrderId, $amount, static fn($c) => $c->refund($reference), \Payarc\GatewayClient::TYPES_REFUND);
-          $response = $result['response'];
-          if ($result['reconciled']) {
-            DonationNote::create(['donationId' => $donationId, 'content' => __('PayArc confirms the earlier refund went through; recorded without refunding again.', 'payarc-payments')]);
-          }
-        }
+      // A marker in the donation meta makes sure a refund whose answer was
+      // lost is found on the sale, not repeated. It is never cleared on
+      // success: GiveWP records the refund after this returns, and a second
+      // call simply finds it on the sale again.
+      $donationId = (int) $donation->id;
+      [$read, $write] = Reconcile::metaStore(
+        static fn() => give_get_meta($donationId, '_payarc_refund_sent', TRUE),
+        static function (array $marker) use ($donationId): void { give_update_meta($donationId, '_payarc_refund_sent', $marker); },
+        static function () use ($donationId): void { give_delete_meta($donationId, '_payarc_refund_sent'); }
+      );
+      $result = Reconcile::once(
+        $client,
+        $read,
+        $write,
+        Shared::orderId('give-refund-' . $donationId),
+        $donation->amount->formatToDecimal(),
+        static fn($c, $key) => $c->refund($reference, NULL, ['reference' => $key, 'description' => sprintf('GiveWP donation %d', $donationId)]),
+        Reconcile::REFUND,
+        $reference
+      );
+      $response = $result['response'];
+      $voided = in_array(strtolower((string) ($response['status'] ?? '')), ['void', 'voided'], TRUE);
+      $verb = $voided ? __('voided before settlement', 'payarc-payments') : __('refunded', 'payarc-payments');
+      if ($result['reconciled']) {
+        DonationNote::create(['donationId' => $donationId, 'content' => __('PayArc confirms the earlier refund went through; recorded without refunding again.', 'payarc-payments')]);
       }
     }
     catch (ReconciliationInconclusiveException | AmbiguousGatewayException | BusyException $e) {
@@ -171,18 +163,18 @@ final class Gateway extends PaymentGateway implements PaymentGatewayRefundable {
       DonationNote::create(['donationId' => $donation->id, 'content' => $message]);
       throw new PaymentGatewayException($message);
     }
-    catch (GatewayException $e) {
+    catch (GatewayException | \InvalidArgumentException $e) {
       Log::error('GiveWP refund failed', ['donation' => $donation->id, 'error' => $e->getMessage()]);
       DonationNote::create(['donationId' => $donation->id, 'content' => sprintf(__('PayArc refund failed: %s', 'payarc-payments'), $e->getMessage())]);
       throw new PaymentGatewayException(sprintf(__('PayArc refund failed: %s', 'payarc-payments'), $e->getMessage()));
     }
-    if (!Shared::approved($response)) {
+    if (!Shared::reversed($response)) {
       $failure = Shared::failure($response);
       DonationNote::create(['donationId' => $donation->id, 'content' => sprintf(__('PayArc refund failed: %s', 'payarc-payments'), $failure['gateway'])]);
       throw new PaymentGatewayException(sprintf(__('PayArc refund failed: %s', 'payarc-payments'), $failure['gateway']));
     }
     $command = new PaymentRefunded();
-    $command->setPaymentNotes(sprintf(__('Donation %1$s via PayArc. Reference: %2$s', 'payarc-payments'), $verb, Shared::transactionReference($response) ?: $reference));
+    $command->setPaymentNotes(sprintf(__('Donation %1$s via PayArc. Reference: %2$s', 'payarc-payments'), $verb, $reference));
     return $command;
   }
 
@@ -191,27 +183,46 @@ final class Gateway extends PaymentGateway implements PaymentGatewayRefundable {
   // ---------------------------------------------------------------------
 
   public function createSubscription(Donation $donation, Subscription $subscription, $gatewayData): GatewayCommand {
-    $key = trim((string) ($gatewayData['payarcPaymentKey'] ?? ''));
+    $key = trim((string) ($gatewayData['payarcToken'] ?? ''));
     if ($key === '') {
       throw new PaymentGatewayException(__('Please enter your card details.', 'payarc-payments'));
     }
     $orderId = Shared::orderId('give-' . $donation->id);
-    $metadata = $this->metadata($donation, 'GIVE-' . $donation->id, $orderId);
+    $options = $this->chargeOptions($donation, 'GIVE-' . $donation->id);
     $amount = $donation->amount->formatToDecimal();
+    $payer = $this->payer($donation);
+    $description = (string) ($donation->formTitle ?: __('Donation', 'payarc-payments'));
 
-    $response = $this->charge(static fn($client) => $client->saleWithPaymentKey($key, $amount, $metadata, TRUE), $orderId, $donation, $amount);
-    $cardReference = trim((string) ($response['savedcard']['key'] ?? ''));
+    // Save the card inside the guarded call (Gateway::saveCard() returns the
+    // same card for a token it has seen) and charge the saved card, which
+    // proves the renewals can be charged too.
+    $shared = $this->shared();
+    $saved = NULL;
+    $call = static function ($client, $reference) use ($shared, $key, $payer, $description, $amount, $options, &$saved) {
+      $saved = $shared->saveCard($client, $key, $payer, $description);
+      return $client->chargeCard($saved['reference'], $amount, ['reference' => $reference] + $options);
+    };
+    $response = $this->charge($call, $orderId, $donation, $amount);
+    if ($saved === NULL) {
+      try {
+        $saved = $shared->saveCard($shared->client(self::INTEGRATION, self::mode()), $key, $payer, $description);
+      }
+      catch (\Throwable $e) {
+        Log::error('GiveWP subscription: saved card not found again', ['donation' => $donation->id, 'error' => $e->getMessage()]);
+      }
+    }
+    $cardReference = trim((string) ($saved['reference'] ?? ''));
     if ($cardReference === '') {
       Log::error('GiveWP subscription: approved without saved card; voiding', ['donation' => $donation->id]);
       try {
-        $this->shared()->client(self::INTEGRATION, self::mode())->void(Shared::transactionReference($response));
+        $shared->client(self::INTEGRATION, self::mode())->void(Shared::transactionReference($response), 'other', 'Card could not be saved');
       }
       catch (\Throwable $e) {
         Log::error('GiveWP subscription: void failed', ['error' => $e->getMessage()]);
       }
       throw new PaymentGatewayException(__('The card could not be saved for future donations. Please try a different card or contact us.', 'payarc-payments'));
     }
-    $card = Shared::card($response);
+    $card = array_filter((array) ($saved['card'] ?? [])) + Shared::card($response);
     $reference = Shared::transactionReference($response);
 
     // The saved-card reference is the "gateway subscription id": nothing is
@@ -222,7 +233,7 @@ final class Gateway extends PaymentGateway implements PaymentGatewayRefundable {
     SubscriptionNote::create([
       'subscriptionId' => $subscription->id,
       'content' => sprintf(
-        __('Recurring donation charged by this site through PayArc using %1$s ending in %2$s. Nothing is scheduled in the PayArc console. Declined renewals are retried every %3$d days, %4$d attempts in all.', 'payarc-payments'),
+        __('Recurring donation charged by this site through PayArc using %1$s ending in %2$s. Nothing is scheduled at PayArc. Declined renewals are retried every %3$d days, %4$d attempts in all.', 'payarc-payments'),
         $card['brand'] ?: __('card', 'payarc-payments'),
         $card['last4'] ?: '????',
         Renewals::RETRY_DAYS,
@@ -335,14 +346,14 @@ final class Gateway extends PaymentGateway implements PaymentGatewayRefundable {
     if (!empty($response['void_error'])) {
       // The card was saved, but the $1 verification hold was not released.
       Log::error('GiveWP: verification hold not voided', ['donation' => $donation->id, 'error' => $response['void_error']]);
-      DonationNote::create(['donationId' => $donation->id, 'content' => sprintf(__('PayArc saved the card but did not void the $%1$s verification hold (%2$s). The hold expires on its own; void it in the console to release it sooner.', 'payarc-payments'), \Payarc\GatewayClient::CARD_VERIFICATION_AMOUNT, $response['void_error'])]);
+      DonationNote::create(['donationId' => $donation->id, 'content' => sprintf(__('PayArc saved the card but did not void the $%1$s verification hold (%2$s). The hold expires on its own after seven days.', 'payarc-payments'), \Payarc\GatewayClient::CARD_VERIFICATION_AMOUNT, $response['void_error'])]);
     }
     return $response;
   }
 
-  public function metadata(Donation $donation, string $invoice, string $orderId): array {
+  public function payer(Donation $donation): array {
     $address = $donation->billingAddress;
-    $payer = [
+    return [
       'email' => (string) $donation->email,
       'first_name' => (string) $donation->firstName,
       'last_name' => (string) $donation->lastName,
@@ -354,38 +365,19 @@ final class Gateway extends PaymentGateway implements PaymentGatewayRefundable {
       'postcode' => $address ? (string) ($address->zip ?? '') : '',
       'country' => $address ? (string) ($address->country ?? '') : '',
     ];
-    $currency = 'USD';
-    try {
-      $currency = (string) $donation->amount->getCurrency()->getCode();
-    }
-    catch (\Throwable $e) {
-      // Money proxies the currency; fall back to USD if the API changes.
-    }
-    return $this->shared()->metadata($invoice, (string) ($donation->formTitle ?: __('Donation', 'payarc-payments')), $payer, ['currency' => $currency, 'orderid' => $orderId]);
+  }
+
+  public function chargeOptions(Donation $donation, string $invoice, array $extra = []): array {
+    return $this->shared()->chargeOptions($invoice, (string) ($donation->formTitle ?: __('Donation', 'payarc-payments')), $this->payer($donation), $extra);
   }
 
   public function gatewayNote(array $response): string {
-    $parts = [sprintf(__('PayArc reference %s', 'payarc-payments'), Shared::transactionReference($response))];
-    if (!empty($response['refnum'])) {
-      $parts[] = sprintf(__('refnum %s', 'payarc-payments'), $response['refnum']);
-    }
-    if (!empty($response['authcode'])) {
-      $parts[] = sprintf(__('auth code %s', 'payarc-payments'), $response['authcode']);
-    }
-    if (!empty($response['avs']['result'])) {
-      $parts[] = sprintf(__('AVS: %s', 'payarc-payments'), $response['avs']['result']);
-    }
-    if (!empty($response['cvc']['result'])) {
-      $parts[] = sprintf(__('CVV: %s', 'payarc-payments'), $response['cvc']['result']);
-    }
+    $note = Shared::note($response, self::mode() === 'sandbox');
     $card = Shared::card($response);
     if ($card['last4']) {
-      $parts[] = sprintf(__('%1$s ending in %2$s', 'payarc-payments'), $card['brand'] ?: __('Card', 'payarc-payments'), $card['last4']);
+      $note = rtrim($note, '.') . ', ' . sprintf(__('%1$s ending in %2$s', 'payarc-payments'), $card['brand'] ?: __('Card', 'payarc-payments'), $card['last4']) . '.';
     }
-    if (self::mode() === 'sandbox') {
-      $parts[] = __('SANDBOX transaction', 'payarc-payments');
-    }
-    return implode(', ', $parts) . '.';
+    return $note;
   }
 
 }
