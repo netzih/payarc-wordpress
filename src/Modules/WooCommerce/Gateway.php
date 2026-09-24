@@ -3,9 +3,11 @@
 namespace Payarc\WordPress\Modules\WooCommerce;
 
 use Payarc\AmbiguousGatewayException;
+use Payarc\Charge;
 use Payarc\DonorMessage;
 use Payarc\GatewayException;
 use Payarc\ReconciliationInconclusiveException;
+use Payarc\UnsettledPartialRefundException;
 use Payarc\WordPress\Gateway as Shared;
 use Payarc\WordPress\Lock;
 use Payarc\WordPress\Plugin;
@@ -19,8 +21,9 @@ use Payarc\WordPress\Reconcile;
  * copies its payment data into $_POST before calling it.
  *
  * Saved cards are WC_Payment_Token_CC rows holding the PayArc saved-card
- * reference. WooCommerce Subscriptions renewals charge that reference from the
- * woocommerce_scheduled_subscription_payment_payarc hook.
+ * reference ("customer_id:card_id"). WooCommerce Subscriptions renewals charge
+ * that reference from the woocommerce_scheduled_subscription_payment_payarc
+ * hook.
  */
 final class Gateway extends \WC_Payment_Gateway {
 
@@ -29,8 +32,6 @@ final class Gateway extends \WC_Payment_Gateway {
   public const INTEGRATION = 'WooCommerce';
 
   public const META_TRANSACTION = '_payarc_transaction_key';
-
-  public const META_REFNUM = '_payarc_refnum';
 
   public const META_MODE = '_payarc_mode';
 
@@ -41,7 +42,7 @@ final class Gateway extends \WC_Payment_Gateway {
   public function __construct() {
     $this->id = self::ID;
     $this->method_title = __('PayArc', 'payarc-payments');
-    $this->method_description = __('Card payments through PayArc with hosted card fields (Pay.js). Credentials and sandbox/live mode are set under Settings > PayArc.', 'payarc-payments');
+    $this->method_description = __('Card payments through PayArc with hosted card fields (Hosted Fields). Credentials and sandbox/live mode are set under Settings > PayArc.', 'payarc-payments');
     $this->has_fields = TRUE;
     $this->supports = [
       'products',
@@ -105,7 +106,7 @@ final class Gateway extends \WC_Payment_Gateway {
         'type' => 'title',
         'description' => sprintf(
           /* translators: %s: settings URL */
-          __('API key, PIN, Pay.js public key and the sandbox/live switch are shared with the other PayArc integrations and live under <a href="%s">Settings &gt; PayArc</a>.', 'payarc-payments'),
+          __('The API bearer token, Client ID and the sandbox/live switch are shared with the other PayArc integrations and live under <a href="%s">Settings &gt; PayArc</a>.', 'payarc-payments'),
           esc_url($settingsUrl)
         ),
       ],
@@ -138,21 +139,17 @@ final class Gateway extends \WC_Payment_Gateway {
   public function frontendConfig(): array {
     $settings = $this->settings();
     return [
-      'publicKey' => $settings->publicKey(),
-      'payJsUrl' => $settings->payJsUrl(),
+      'clientId' => $settings->clientId(),
+      'scriptUrl' => $settings->hostedFieldsUrl(),
       'configured' => $settings->isConfigured(),
       'sandbox' => $settings->isSandbox(),
-      'applePay' => [
-        'enabled' => $settings->applePayEnabled() && !$this->cardOnFileRequired(),
-        'displayName' => $settings->applePayDisplayName(),
-        'countryCode' => WC()->countries ? WC()->countries->get_base_country() : 'US',
-        'currencyCode' => get_woocommerce_currency(),
-      ],
+      'wallets' => $this->cardOnFileRequired() ? [] : $settings->wallets(),
+      'total' => WC()->cart ? (string) WC()->cart->get_total('edit') : '0',
       'i18n' => [
         'notConfigured' => __('The payment form is not configured correctly, so no charge was made. Please contact us.', 'payarc-payments'),
         'secureNote' => __('Card details are entered securely in a form hosted by PayArc.', 'payarc-payments'),
         'orCard' => __('or enter card details', 'payarc-payments'),
-        'sandboxNote' => __('Sandbox mode: use test card 4000100011112224.', 'payarc-payments'),
+        'sandboxNote' => __('Sandbox mode: use test card 4012 0000 9876 5439, 12/29, CVV 999, ZIP 85284.', 'payarc-payments'),
       ],
     ];
   }
@@ -182,15 +179,15 @@ final class Gateway extends \WC_Payment_Gateway {
       $this->saved_payment_methods();
     }
     echo '<div class="wc-payment-form payarc-wc-fields">';
-    if ($this->settings()->applePayEnabled() && !$this->cardOnFileRequired()) {
-      echo '<div class="payarc-apple-pay" id="payarc-wc-apple-pay" hidden><div class="payarc-apple-pay-button" id="payarc-wc-apple-pay-button"></div><div class="payarc-apple-pay-divider"><span>' . esc_html__('or enter card details', 'payarc-payments') . '</span></div></div>';
+    if ($this->settings()->walletsEnabled() && !$this->cardOnFileRequired()) {
+      echo '<div class="payarc-wallets-wrapper" id="payarc-wc-wallets" hidden><div class="payarc-wallet-buttons"></div><div class="payarc-wallet-divider"><span>' . esc_html__('or enter card details', 'payarc-payments') . '</span></div></div>';
     }
     echo '<div id="payarc-wc-card" class="payarc-card-element" aria-label="' . esc_attr__('Secure card details', 'payarc-payments') . '"></div>';
     echo '<div id="payarc-wc-errors" class="payarc-card-errors" role="alert" aria-live="polite"></div>';
-    echo '<input type="hidden" id="payarc_payment_key" name="payarc_payment_key" value="" autocomplete="off">';
+    echo '<input type="hidden" id="payarc_token" name="payarc_token" value="" autocomplete="off">';
     echo '<p class="payarc-card-note">' . esc_html__('Card details are entered securely in a form hosted by PayArc.', 'payarc-payments') . '</p>';
     if ($this->settings()->isSandbox()) {
-      echo '<p class="payarc-card-note">' . esc_html__('Sandbox mode: use test card 4000100011112224.', 'payarc-payments') . '</p>';
+      echo '<p class="payarc-card-note">' . esc_html__('Sandbox mode: use test card 4012 0000 9876 5439, 12/29, CVV 999, ZIP 85284.', 'payarc-payments') . '</p>';
     }
     echo '</div>';
     if ($showSaved && !is_add_payment_method_page() && !$this->cartForcesSavedCard()) {
@@ -206,8 +203,9 @@ final class Gateway extends \WC_Payment_Gateway {
   }
 
   /**
-   * Apple Pay keys are single-use and return no saved card, so the button is
-   * offered only where nothing needs to be charged later: not for
+   * Wallet tokens cannot be saved for later charges, so the Apple Pay and
+   * Google Pay buttons are offered only where nothing needs to be charged
+   * later: not for
    * subscription carts, saving a card, changing a subscription's card, or
    * paying an order that contains a subscription.
    */
@@ -248,11 +246,11 @@ final class Gateway extends \WC_Payment_Gateway {
     }
 
     $tokenId = $this->postedTokenId();
-    $paymentKey = trim((string) ($_POST['payarc_payment_key'] ?? ''));
+    $paymentKey = trim((string) ($_POST['payarc_token'] ?? ''));
     $saveCard = $this->shouldSaveCard($order);
     $amount = (float) $order->get_total();
     $orderId = Shared::orderId('wc-' . $order->get_id());
-    $metadata = $this->metadata($order, $orderId);
+    $options = $this->chargeOptions($order);
 
     $cardReference = '';
     $token = NULL;
@@ -267,18 +265,31 @@ final class Gateway extends \WC_Payment_Gateway {
       return $this->failure(__('Please enter your card details.', 'payarc-payments'));
     }
 
+    // A new card that must be kept is saved at PayArc first and the saved
+    // card charged (a token can be used only once). Gateway::saveCard() hands
+    // back the same card for a token it has seen, so a replay charges it too.
+    $shared = $this->shared();
+    $payer = $this->payer($order);
+    $description = (string) ($options['description'] ?? '');
+    $saved = NULL;
+    $saveFirst = $cardReference === '' && ($saveCard || $amount <= 0);
+
     if ($amount <= 0) {
       // Free order (e.g. subscription with free trial): store the card only.
       if ($cardReference === '') {
-        $outcome = $this->charge(static fn($client) => $client->verifyAndSaveCardWithPaymentKey($paymentKey, $metadata), $orderId, $order, \Payarc\GatewayClient::CARD_VERIFICATION_AMOUNT);
+        $call = static function ($client, $reference) use ($shared, $paymentKey, $payer, $description, $options, &$saved) {
+          $saved = $shared->saveCard($client, $paymentKey, $payer, $description);
+          return $client->verifyCard($saved['reference'], ['reference' => $reference] + $options);
+        };
+        $outcome = $this->charge($call, $orderId, $order, \Payarc\GatewayClient::CARD_VERIFICATION_AMOUNT);
         if (!empty($outcome['error'])) {
           return $this->failure($outcome['error']);
         }
-        $cardReference = trim((string) ($outcome['response']['savedcard']['key'] ?? ''));
-        if ($cardReference === '') {
+        $saved = $saved ?? $this->savedAgain($paymentKey, $payer, $description);
+        if (empty($saved['reference'])) {
           return $this->failure(__('The card could not be saved for future payments. Please try a different card or contact us.', 'payarc-payments'));
         }
-        $this->rememberCard($order, $outcome['response'], $cardReference, $saveCard, $token);
+        $this->rememberCard($order, (array) $saved['card'], (string) $saved['reference'], $saveCard, $token);
       }
       else {
         $this->rememberCard($order, [], $cardReference, FALSE, $token);
@@ -289,39 +300,45 @@ final class Gateway extends \WC_Payment_Gateway {
       return ['result' => 'success', 'redirect' => $this->get_return_url($order)];
     }
 
+    $money = self::money($amount);
     if ($cardReference !== '') {
-      $outcome = $this->charge(static fn($client) => $client->saleWithCardReference($cardReference, self::money($amount), $metadata), $orderId, $order, self::money($amount));
+      $call = static fn($client, $reference) => $client->chargeCard($cardReference, $money, ['reference' => $reference] + $options);
+    }
+    elseif ($saveFirst) {
+      $call = static function ($client, $reference) use ($shared, $paymentKey, $payer, $description, $options, $money, &$saved) {
+        $saved = $shared->saveCard($client, $paymentKey, $payer, $description);
+        return $client->chargeCard($saved['reference'], $money, ['reference' => $reference] + $options);
+      };
     }
     else {
-      $outcome = $this->charge(static fn($client) => $client->saleWithPaymentKey($paymentKey, self::money($amount), $metadata, $saveCard), $orderId, $order, self::money($amount));
+      $call = static fn($client, $reference) => $client->chargeToken($paymentKey, $money, ['reference' => $reference] + $options);
     }
+    $outcome = $this->charge($call, $orderId, $order, $money);
     if (!empty($outcome['error'])) {
       return $this->failure($outcome['error']);
     }
     $response = $outcome['response'];
     $reference = Shared::transactionReference($response);
-    $newReference = trim((string) ($response['savedcard']['key'] ?? ''));
-    if ($newReference !== '') {
-      $cardReference = $newReference;
+    if ($saveFirst) {
+      $saved = $saved ?? $this->savedAgain($paymentKey, $payer, $description);
+      $cardReference = (string) ($saved['reference'] ?? '');
     }
     if ($cardReference === '' && $this->orderNeedsCardOnFile($order)) {
       // Approved, but nothing to charge on renewal: undo the sale rather than
       // start a subscription that can never renew.
-      $this->log('Order ' . $order->get_id() . ' contains a subscription but PayArc returned no saved card; voiding.', 'error');
+      $this->log('Order ' . $order->get_id() . ' contains a subscription but the card could not be saved; voiding.', 'error');
       $this->voidQuietly($reference, $order);
       return $this->failure(__('The card could not be saved for future payments. Please try a different card or contact us.', 'payarc-payments'));
     }
-    $card = Shared::card($response);
+    $card = array_filter((array) ($saved['card'] ?? [])) + Shared::card($response);
     if ($token && (empty($card['brand']) || empty($card['last4']))) {
-      // Card-on-file sales echo little card data; fall back to the token.
-      $card = ['brand' => $card['brand'] ?: ucfirst((string) $token->get_card_type()), 'last4' => $card['last4'] ?: (string) $token->get_last4()];
+      $card = ['brand' => $card['brand'] ?? ucfirst((string) $token->get_card_type()), 'last4' => $card['last4'] ?? (string) $token->get_last4()] + $card;
     }
 
     $order->update_meta_data(self::META_TRANSACTION, $reference);
-    $order->update_meta_data(self::META_REFNUM, (string) ($response['refnum'] ?? ''));
     $order->update_meta_data(self::META_MODE, $this->settings()->mode());
     $order->update_meta_data(self::META_CARD_SUMMARY, self::summary($card));
-    $this->rememberCard($order, $response, $cardReference, $saveCard && $newReference !== '', $token);
+    $this->rememberCard($order, $card, $cardReference, $saveCard && $saved !== NULL, $token);
     $order->add_order_note($this->gatewayNote($response));
     $order->payment_complete($reference);
     $this->emptyCart();
@@ -329,10 +346,24 @@ final class Gateway extends \WC_Payment_Gateway {
   }
 
   /**
+   * The card saved for a token by an earlier attempt, when this attempt's
+   * charge was recovered without running the call.
+   */
+  private function savedAgain(string $paymentKey, array $payer, string $description): ?array {
+    try {
+      return $this->shared()->saveCard($this->shared()->client(self::INTEGRATION), $paymentKey, $payer, $description);
+    }
+    catch (\Throwable $e) {
+      $this->log('Saved card not found again: ' . $e->getMessage(), 'error');
+      return NULL;
+    }
+  }
+
+  /**
    * Save the card reference on the order and its subscriptions, and as a
    * customer token when asked (or when a subscription needs it).
    */
-  private function rememberCard(\WC_Order $order, array $response, string $cardReference, bool $saveToken, ?\WC_Payment_Token $existing): void {
+  private function rememberCard(\WC_Order $order, array $card, string $cardReference, bool $saveToken, ?\WC_Payment_Token $existing): void {
     if ($cardReference === '') {
       return;
     }
@@ -343,7 +374,7 @@ final class Gateway extends \WC_Payment_Gateway {
       $order->add_payment_token($existing);
     }
     elseif ($saveToken && $order->get_user_id()) {
-      $token = $this->createToken($response, $cardReference, (int) $order->get_user_id());
+      $token = $this->createToken($card, $cardReference, (int) $order->get_user_id());
       if ($token) {
         $order->add_payment_token($token);
       }
@@ -358,15 +389,18 @@ final class Gateway extends \WC_Payment_Gateway {
     }
   }
 
-  private function createToken(array $response, string $cardReference, int $userId): ?\WC_Payment_Token_CC {
-    $card = Shared::card($response);
-    [$month, $year] = self::expiry($response);
+  /**
+   * @param array $card
+   *   CardDetails::fromResponse() of the saved card.
+   */
+  private function createToken(array $card, string $cardReference, int $userId): ?\WC_Payment_Token_CC {
+    [$month, $year] = self::expiry($card);
     $token = new \WC_Payment_Token_CC();
     $token->set_token($cardReference);
     $token->set_gateway_id($this->id);
     $token->set_user_id($userId);
-    $token->set_card_type(strtolower((string) ($card['brand'] ?: 'card')));
-    $token->set_last4((string) ($card['last4'] ?: '0000'));
+    $token->set_card_type(strtolower((string) (($card['brand'] ?? '') ?: 'card')));
+    $token->set_last4((string) (($card['last4'] ?? '') ?: '0000'));
     $token->set_expiry_month($month);
     $token->set_expiry_year($year);
     // A sandbox reference is useless against the live host and vice versa.
@@ -382,17 +416,15 @@ final class Gateway extends \WC_Payment_Gateway {
   }
 
   /**
-   * @return array{0: string, 1: string} MM and YYYY. PayArc returns MMYY on
-   *   savedcard.expiration; when absent the token still needs a value, so a
-   *   far-future date is used and the card stays usable.
+   * @return array{0: string, 1: string} MM and YYYY from the saved card; when
+   *   absent the token still needs a value, so a far-future date is used and
+   *   the card stays usable.
    */
-  public static function expiry(array $response): array {
-    $raw = preg_replace('/\D/', '', (string) ($response['savedcard']['expiration'] ?? $response['creditcard']['expiration'] ?? ''));
-    if (strlen($raw) === 4) {
-      return [substr($raw, 0, 2), '20' . substr($raw, 2, 2)];
-    }
-    if (strlen($raw) === 6) {
-      return [substr($raw, 0, 2), substr($raw, 2, 4)];
+  public static function expiry(array $card): array {
+    $month = (string) ($card['exp_month'] ?? '');
+    $year = (string) ($card['exp_year'] ?? '');
+    if (preg_match('/^\d{2}$/', $month) && preg_match('/^\d{4}$/', $year)) {
+      return [$month, $year];
     }
     return ['12', (string) ((int) gmdate('Y') + 10)];
   }
@@ -432,17 +464,17 @@ final class Gateway extends \WC_Payment_Gateway {
       return;
     }
     try {
-      $void = $this->shared()->client(self::INTEGRATION)->void($reference);
+      $void = $this->shared()->client(self::INTEGRATION)->void($reference, 'other', 'Card could not be saved');
       if ($order) {
-        $order->add_order_note(Shared::approved($void)
-          ? sprintf(__('PayArc sale %s voided: no saved card reference was returned.', 'payarc-payments'), $reference)
-          : sprintf(__('PayArc sale %1$s could NOT be voided (%2$s); void it in the console.', 'payarc-payments'), $reference, Shared::failure($void)['gateway']));
+        $order->add_order_note(Shared::reversed($void)
+          ? sprintf(__('PayArc charge %s voided: the card could not be saved for renewals.', 'payarc-payments'), $reference)
+          : sprintf(__('PayArc charge %1$s could NOT be voided (%2$s); void it in the PayArc dashboard.', 'payarc-payments'), $reference, Shared::failure($void)['gateway']));
       }
     }
     catch (\Throwable $e) {
       $this->log('Void failed for ' . $reference . ': ' . $e->getMessage(), 'error');
       if ($order) {
-        $order->add_order_note(sprintf(__('PayArc sale %1$s could NOT be voided (%2$s); void it in the console.', 'payarc-payments'), $reference, $e->getMessage()));
+        $order->add_order_note(sprintf(__('PayArc charge %1$s could NOT be voided (%2$s); void it in the PayArc dashboard.', 'payarc-payments'), $reference, $e->getMessage()));
       }
     }
   }
@@ -467,13 +499,13 @@ final class Gateway extends \WC_Payment_Gateway {
   }
 
   public function add_payment_method() {
-    $paymentKey = trim((string) ($_POST['payarc_payment_key'] ?? ''));
+    $paymentKey = trim((string) ($_POST['payarc_token'] ?? ''));
     if ($paymentKey === '' || !is_user_logged_in()) {
       wc_add_notice(__('Please enter your card details.', 'payarc-payments'), 'error');
       return ['result' => 'failure', 'redirect' => wc_get_endpoint_url('payment-methods')];
     }
     $user = wp_get_current_user();
-    $metadata = $this->shared()->metadata('WC-user-' . $user->ID, __('Card verification', 'payarc-payments'), [
+    $payer = [
       'email' => $user->user_email,
       'first_name' => get_user_meta($user->ID, 'billing_first_name', TRUE) ?: $user->first_name,
       'last_name' => get_user_meta($user->ID, 'billing_last_name', TRUE) ?: $user->last_name,
@@ -482,14 +514,21 @@ final class Gateway extends \WC_Payment_Gateway {
       'state' => get_user_meta($user->ID, 'billing_state', TRUE),
       'postcode' => get_user_meta($user->ID, 'billing_postcode', TRUE),
       'country' => get_user_meta($user->ID, 'billing_country', TRUE),
-    ]);
-    $outcome = $this->charge(static fn($client) => $client->verifyAndSaveCardWithPaymentKey($paymentKey, $metadata), NULL, NULL);
+    ];
+    $description = sprintf(__('WooCommerce customer %d', 'payarc-payments'), $user->ID);
+    $options = $this->shared()->chargeOptions('WC-user-' . $user->ID, __('Card verification', 'payarc-payments'), $payer);
+    $shared = $this->shared();
+    $saved = NULL;
+    $call = static function ($client, $reference) use ($shared, $paymentKey, $payer, $description, $options, &$saved) {
+      $saved = $shared->saveCard($client, $paymentKey, $payer, $description);
+      return $client->verifyCard($saved['reference'], ($reference !== '' ? ['reference' => $reference] : []) + $options);
+    };
+    $outcome = $this->charge($call, NULL, NULL);
     if (!empty($outcome['error'])) {
       wc_add_notice($outcome['error'], 'error');
       return ['result' => 'failure', 'redirect' => wc_get_endpoint_url('payment-methods')];
     }
-    $cardReference = trim((string) ($outcome['response']['savedcard']['key'] ?? ''));
-    $token = $cardReference !== '' ? $this->createToken($outcome['response'], $cardReference, (int) $user->ID) : NULL;
+    $token = !empty($saved['reference']) ? $this->createToken((array) $saved['card'], (string) $saved['reference'], (int) $user->ID) : NULL;
     if (!$token) {
       wc_add_notice(__('The card could not be saved. Please try again or contact us.', 'payarc-payments'), 'error');
       return ['result' => 'failure', 'redirect' => wc_get_endpoint_url('payment-methods')];
@@ -517,72 +556,61 @@ final class Gateway extends \WC_Payment_Gateway {
     // Refund against the host the sale was made on, whatever the site's mode is now.
     $mode = (string) $order->get_meta(self::META_MODE) ?: $this->settings()->mode();
     $amount = $amount === NULL ? (float) $order->get_total() : (float) $amount;
-    // wc_create_refund() has already saved this refund, so get_total_refunded()
-    // includes it; anything beyond $amount was refunded earlier.
-    $previouslyRefunded = max(0.0, (float) $order->get_total_refunded() - $amount);
-    $full = abs($amount - (float) $order->get_total()) < 0.005 && $previouslyRefunded < 0.005;
-
     try {
       $client = $this->shared()->client(self::INTEGRATION, $mode);
-      $transaction = $client->getTransaction($reference);
-      $status = (string) ($transaction['status_code'] ?? '');
-      if ($status === 'P' || $status === 'A') {
-        if (!$full) {
-          return new \WP_Error('payarc', __('This sale has not settled yet, so it can only be voided in full. Try a partial refund tomorrow.', 'payarc-payments'));
-        }
-        $response = $client->void($reference);
-        $verb = __('voided before settlement', 'payarc-payments');
+      // A marker on the order makes sure a refund whose answer was lost is
+      // found on the sale, not sent again.
+      [$read, $write] = Reconcile::metaStore(
+        static fn() => $order->get_meta('_payarc_refund_sent'),
+        static function (array $marker) use ($order): void { $order->update_meta_data('_payarc_refund_sent', $marker); $order->save(); },
+        static function () use ($order): void { $order->delete_meta_data('_payarc_refund_sent'); $order->save(); }
+      );
+      $result = Reconcile::once(
+        $client,
+        $read,
+        $write,
+        Shared::orderId('wc-refund-' . $order->get_id()),
+        self::money($amount),
+        static fn($c, $key) => $c->refund($reference, self::money($amount), ['reference' => $key, 'description' => $reason !== '' ? $reason : sprintf('WooCommerce order %s', $order->get_order_number())]),
+        Reconcile::REFUND,
+        $reference
+      );
+      if ($result['reconciled'] && abs((float) $result['amount'] - $amount) >= 0.005) {
+        // The refund dialog shows this text raw, so no price markup.
+        return new \WP_Error('payarc', Reconcile::refundMismatchMessage(html_entity_decode(wp_strip_all_tags(wc_price((float) $result['amount'], ['currency' => $order->get_currency()])), ENT_QUOTES), $reference));
       }
-      else {
-        $verb = __('refunded', 'payarc-payments');
-        // Refunds inherit the sale's orderid at PayArc. A marker on the order
-        // makes sure a refund whose answer was lost is found, not repeated.
-        $saleOrderId = trim((string) ($transaction['orderid'] ?? ''));
-        if ($saleOrderId === '') {
-          $response = $client->refund($reference, self::money($amount));
-        }
-        else {
-          [$read, $write] = Reconcile::metaStore(
-            static fn() => $order->get_meta('_payarc_refund_sent'),
-            static function (array $marker) use ($order): void { $order->update_meta_data('_payarc_refund_sent', $marker); $order->save(); },
-            static function () use ($order): void { $order->delete_meta_data('_payarc_refund_sent'); $order->save(); }
-          );
-          $result = Reconcile::once($client, $read, $write, $saleOrderId, self::money($amount), static fn($c) => $c->refund($reference, self::money($amount)), \Payarc\GatewayClient::TYPES_REFUND);
-          if ($result['reconciled'] && abs((float) $result['amount'] - $amount) >= 0.005) {
-            // The refund dialog shows this text raw, so no price markup.
-            return new \WP_Error('payarc', Reconcile::refundMismatchMessage(html_entity_decode(wp_strip_all_tags(wc_price((float) $result['amount'], ['currency' => $order->get_currency()])), ENT_QUOTES), Shared::transactionReference($result['response'])));
-          }
-          $response = $result['response'];
-          if ($result['reconciled']) {
-            $order->add_order_note(__('PayArc confirms the earlier refund went through; recorded without refunding again.', 'payarc-payments'));
-          }
-          $clearRefundMarker = $write;
-        }
+      $response = $result['response'];
+      $voided = in_array(strtolower((string) ($response['status'] ?? '')), ['void', 'voided'], TRUE);
+      $verb = $voided ? __('voided before settlement (the whole charge)', 'payarc-payments') : __('refunded', 'payarc-payments');
+      if ($result['reconciled']) {
+        $order->add_order_note(__('PayArc confirms the earlier refund went through; recorded without refunding again.', 'payarc-payments'));
       }
+      $clearRefundMarker = $write;
+    }
+    catch (UnsettledPartialRefundException $e) {
+      return new \WP_Error('payarc', __('This sale has not settled yet. Refunding part of it now would cancel the whole sale at PayArc, so nothing was sent. Refund the full amount, or refund part of it after the sale settles (normally the next business day).', 'payarc-payments'));
     }
     catch (ReconciliationInconclusiveException | AmbiguousGatewayException | BusyException $e) {
       $this->log('Refund unresolved for order ' . $order_id . ': ' . $e->getMessage(), 'error');
       return new \WP_Error('payarc', Reconcile::refundBlockedMessage($e, $reference));
     }
-    catch (GatewayException $e) {
+    catch (GatewayException | \InvalidArgumentException $e) {
       $this->log('Refund failed for order ' . $order_id . ': ' . $e->getMessage(), 'error');
       return new \WP_Error('payarc', $e->getMessage());
     }
-    if (!Shared::approved($response)) {
+    if (!Shared::reversed($response)) {
       $failure = Shared::failure($response);
       $this->log('Refund declined for order ' . $order_id . ': ' . $failure['gateway'], 'error');
       return new \WP_Error('payarc', $failure['gateway']);
     }
-    if (isset($clearRefundMarker)) {
-      // WooCommerce created the refund record before calling in, so once the
-      // gateway has approved there is nothing left that could be lost.
-      $clearRefundMarker(NULL);
-    }
+    // WooCommerce created the refund record before calling in, so once
+    // PayArc has confirmed there is nothing left that could be lost.
+    $clearRefundMarker(NULL);
     $order->add_order_note(sprintf(
       __('%1$s %2$s via PayArc. Reference: %3$s%4$s', 'payarc-payments'),
       wc_price($amount, ['currency' => $order->get_currency()]),
       $verb,
-      Shared::transactionReference($response) ?: $reference,
+      $reference,
       $reason !== '' ? ' — ' . $reason : ''
     ));
     return TRUE;
@@ -643,15 +671,24 @@ final class Gateway extends \WC_Payment_Gateway {
       return;
     }
     // Every attempt is recorded (orderid + time) BEFORE its charge is sent
-    // and removed only once PayArc gave a conclusive answer. Attempts still
-    // listed are looked up before anything new is sent, each within its own
-    // time window, so a lost response can never turn into a second charge
-    // and an old, settled decline never blocks a retry.
+    // and removed only once PayArc gave a conclusive answer. The orderid is
+    // the charge's Idempotency-Key: an attempt still listed is sent again
+    // with it while PayArc holds it (returning the earlier result, or making
+    // the charge if it never arrived) and looked up after that, so a lost
+    // response can never turn into a second charge and an old, settled
+    // decline never blocks a retry.
     $attempts = (int) $order->get_meta('_payarc_renewal_attempts');
     $pending = $this->pendingAttempts($order);
+    $options = $this->chargeOptions($order, TRUE);
     foreach ($pending as $i => $attempt) {
       try {
-        $found = $this->findApproved((string) $attempt['orderid'], (int) $attempt['sent_at'] ?: NULL, self::money($amount));
+        $found = (int) ($attempt['sent_at'] ?? 0) >= time() - Reconcile::REPLAY_WINDOW
+          ? $this->replayRenewal($cardReference, self::money($amount), ['reference' => (string) $attempt['orderid']] + $options)
+          : $this->findApproved((string) $attempt['orderid'], (int) $attempt['sent_at'] ?: NULL, self::money($amount));
+      }
+      catch (AmbiguousGatewayException $e) {
+        $order->add_order_note(sprintf(__('PayArc still gives no clear answer for the earlier attempt %1$s (%2$s). The order stays pending and nothing new was charged; retry later.', 'payarc-payments'), $attempt['orderid'], $e->getMessage()));
+        return;
       }
       catch (ReconciliationInconclusiveException $e) {
         $order->add_order_note(sprintf(__('PayArc could not confirm whether the earlier attempt %1$s was charged (%2$s). The order stays pending and nothing new was charged; retry later.', 'payarc-payments'), $attempt['orderid'], $e->getMessage()));
@@ -668,14 +705,13 @@ final class Gateway extends \WC_Payment_Gateway {
       unset($pending[$i]);
     }
     $orderId = Shared::orderId('wc-' . $order->get_id() . '-' . $attempts);
-    $metadata = $this->metadata($order, $orderId);
-    unset($metadata['clientip']);
     $pending[] = ['orderid' => $orderId, 'sent_at' => time()];
     $order->update_meta_data('_payarc_renewal_attempts', $attempts + 1);
     $order->update_meta_data('_payarc_renewal_pending', array_values($pending));
     $order->save();
 
-    $outcome = $this->charge(static fn($client) => $client->saleWithCardReference($cardReference, self::money($amount), $metadata), $orderId, $order);
+    $money = self::money($amount);
+    $outcome = $this->charge(static fn($client) => $client->chargeCard($cardReference, $money, ['reference' => $orderId] + $options), NULL, $order);
     if (!empty($outcome['ambiguous'])) {
       // Leave the order pending and the attempt listed: a "failed" status
       // would make Subscriptions retry, and the charge may have gone through.
@@ -716,14 +752,40 @@ final class Gateway extends \WC_Payment_Gateway {
   private function completeRenewal(\WC_Order $order, array $response): void {
     $reference = Shared::transactionReference($response);
     $order->update_meta_data(self::META_TRANSACTION, $reference);
-    $order->update_meta_data(self::META_REFNUM, (string) ($response['refnum'] ?? ''));
     $order->update_meta_data(self::META_MODE, $this->settings()->mode());
     $order->add_order_note($this->gatewayNote($response));
     $order->payment_complete($reference);
   }
 
   /**
-   * The approved transaction carrying this orderid, or NULL when PayArc
+   * Send an earlier renewal attempt again with its key. Returns the approved
+   * charge, or NULL when it was declined (a conclusive answer).
+   *
+   * @throws AmbiguousGatewayException
+   */
+  private function replayRenewal(string $cardReference, string $amount, array $options): ?array {
+    $client = $this->shared()->client(self::INTEGRATION);
+    try {
+      $response = $client->chargeCard($cardReference, $amount, $options);
+    }
+    catch (AmbiguousGatewayException $e) {
+      $response = $client->chargeCard($cardReference, $amount, $options);
+    }
+    catch (GatewayException $e) {
+      return NULL;
+    }
+    $outcome = Charge::outcome($response);
+    if ($outcome === Charge::APPROVED) {
+      return $response;
+    }
+    if ($outcome === Charge::DECLINED) {
+      return NULL;
+    }
+    throw new AmbiguousGatewayException(sprintf('PayArc answered with status "%s".', (string) ($response['status'] ?? '')), 0, $response);
+  }
+
+  /**
+   * The approved charge sent with this reference, or NULL when PayArc
    * provably has none (or only a declined one).
    *
    * @throws \Payarc\ReconciliationInconclusiveException
@@ -732,14 +794,11 @@ final class Gateway extends \WC_Payment_Gateway {
    */
   private function findApproved(string $orderId, ?int $sentAt, string $amount): ?array {
     try {
-      $found = $this->shared()->client(self::INTEGRATION)->findTransactionByOrderId($orderId, $sentAt, 5, $amount);
+      $found = Reconcile::lookup($this->shared()->client(self::INTEGRATION), $orderId, $sentAt, $amount);
     }
     catch (ReconciliationInconclusiveException $e) {
-      throw $e;
-    }
-    catch (\Throwable $e) {
       $this->log('Reconciliation lookup failed for ' . $orderId . ': ' . $e->getMessage(), 'error');
-      throw new ReconciliationInconclusiveException('The lookup for ' . $orderId . ' failed: ' . $e->getMessage(), 0, [], $e);
+      throw $e;
     }
     return $found && Shared::approved($found) ? $found : NULL;
   }
@@ -750,7 +809,7 @@ final class Gateway extends \WC_Payment_Gateway {
    */
   private function changeSubscriptionPaymentMethod(\WC_Order $subscription): array {
     $tokenId = $this->postedTokenId();
-    $paymentKey = trim((string) ($_POST['payarc_payment_key'] ?? ''));
+    $paymentKey = trim((string) ($_POST['payarc_token'] ?? ''));
     $cardReference = '';
     $token = NULL;
     if ($tokenId > 0) {
@@ -764,20 +823,27 @@ final class Gateway extends \WC_Payment_Gateway {
       return $this->failure(__('Please enter your card details.', 'payarc-payments'));
     }
     else {
-      $subOrderId = Shared::orderId('wc-sub-' . $subscription->get_id() . '-' . time());
-      $metadata = $this->metadata($subscription, $subOrderId);
-      $outcome = $this->charge(static fn($client) => $client->verifyAndSaveCardWithPaymentKey($paymentKey, $metadata), $subOrderId, NULL);
+      $options = $this->chargeOptions($subscription);
+      $payer = $this->payer($subscription);
+      $description = (string) ($options['description'] ?? '');
+      $shared = $this->shared();
+      $saved = NULL;
+      $call = static function ($client) use ($shared, $paymentKey, $payer, $description, $options, &$saved) {
+        $saved = $shared->saveCard($client, $paymentKey, $payer, $description);
+        return $client->verifyCard($saved['reference'], $options);
+      };
+      $outcome = $this->charge($call, NULL, NULL);
       if (!empty($outcome['error'])) {
         return $this->failure($outcome['error']);
       }
-      $cardReference = trim((string) ($outcome['response']['savedcard']['key'] ?? ''));
+      $cardReference = trim((string) ($saved['reference'] ?? ''));
       if ($cardReference === '') {
         return $this->failure(__('The card could not be saved for future payments. Please try a different card or contact us.', 'payarc-payments'));
       }
       if ($subscription->get_user_id()) {
-        $token = $this->createToken($outcome['response'], $cardReference, (int) $subscription->get_user_id());
+        $token = $this->createToken((array) $saved['card'], $cardReference, (int) $subscription->get_user_id());
       }
-      $subscription->add_order_note(sprintf(__('Card updated: %s', 'payarc-payments'), self::summary(Shared::card($outcome['response']))));
+      $subscription->add_order_note(sprintf(__('Card updated: %s', 'payarc-payments'), self::summary((array) $saved['card'])));
     }
     $subscription->update_meta_data(self::META_CARD_REFERENCE, $cardReference);
     $subscription->update_meta_data(self::META_MODE, $this->settings()->mode());
@@ -798,8 +864,9 @@ final class Gateway extends \WC_Payment_Gateway {
    * With an $orderId, an $order and an $amount the call is made at most once
    * for that order: a marker in the order's meta is stored before the request
    * and a resubmit after a lost response or a crash finds the earlier approval
-   * instead of charging again. Renewals pass no $amount and keep their own
-   * per-attempt list.
+   * instead of charging again. $call gets the client and the idempotency key
+   * to send as 'reference' ('' without a marker). Renewals pass no $orderId
+   * and keep their own per-attempt list.
    *
    * @return array{response?: array, error?: string, gateway?: string, ambiguous?: bool}
    */
@@ -830,20 +897,20 @@ final class Gateway extends \WC_Payment_Gateway {
         }
       }
       else {
-        $response = $call($client);
+        $response = $call($client, '');
       }
     }
     catch (ReconciliationInconclusiveException $e) {
       $this->log('Reconciliation inconclusive: ' . $e->getMessage(), 'error');
       if ($order) {
-        $order->add_order_note(sprintf(__('PayArc could not confirm whether an earlier charge for this order went through (%s). Nothing was charged; check the console before retrying.', 'payarc-payments'), $e->getMessage()));
+        $order->add_order_note(sprintf(__('PayArc could not confirm whether an earlier charge for this order went through (%s). Nothing was charged; check the PayArc dashboard before retrying.', 'payarc-payments'), $e->getMessage()));
       }
       return ['error' => __('An earlier attempt to make this payment may have gone through, and the card processor could not confirm it. Nothing was charged now. Please contact us before trying again.', 'payarc-payments'), 'gateway' => $e->getMessage(), 'ambiguous' => TRUE];
     }
     catch (AmbiguousGatewayException $e) {
       $this->log('Ambiguous response: ' . $e->getMessage(), 'error');
       if ($order) {
-        $order->add_order_note(sprintf(__('PayArc did not answer conclusively (%s). Check the console before retrying.', 'payarc-payments'), $e->getMessage()));
+        $order->add_order_note(sprintf(__('PayArc did not answer conclusively (%s). Check the PayArc dashboard before retrying.', 'payarc-payments'), $e->getMessage()));
       }
       return ['error' => __('The payment could not be completed because the card processor did not respond. Please wait a moment and try again. If the problem continues, contact us.', 'payarc-payments'), 'gateway' => $e->getMessage(), 'ambiguous' => TRUE];
     }
@@ -871,6 +938,21 @@ final class Gateway extends \WC_Payment_Gateway {
       }
       return ['error' => __('The payment could not be processed right now. Please try again in a moment, or contact us for help.', 'payarc-payments'), 'gateway' => $e->getMessage()];
     }
+    // Without a marker (renewals, card checks) Reconcile has not judged the
+    // answer: one that does not say whether the card was charged must not
+    // be taken for a decline, and a partial approval is given back.
+    $outcome = Charge::outcome($response);
+    if ($outcome === Charge::PARTIAL) {
+      $this->voidQuietly(Charge::id($response), $order);
+      $response = ['failure_code' => 'PARTIAL', 'failure_message' => __('Only part of the amount was approved, so the charge was voided.', 'payarc-payments')] + $response;
+    }
+    elseif (!in_array($outcome, [Charge::APPROVED, Charge::DECLINED], TRUE)) {
+      $this->log('Unclear answer: status ' . (string) ($response['status'] ?? ''), 'error');
+      if ($order) {
+        $order->add_order_note(sprintf(__('PayArc answered with status "%s", which does not say whether the card was charged. Check the PayArc dashboard before retrying.', 'payarc-payments'), (string) ($response['status'] ?? '')));
+      }
+      return ['error' => __('The payment could not be completed because the card processor did not respond. Please wait a moment and try again. If the problem continues, contact us.', 'payarc-payments'), 'gateway' => (string) ($response['status'] ?? ''), 'ambiguous' => TRUE];
+    }
     if (!Shared::approved($response)) {
       $failure = Shared::failure($response);
       $this->log('Declined: ' . $failure['gateway'], 'info');
@@ -883,7 +965,7 @@ final class Gateway extends \WC_Payment_Gateway {
       // The card was saved, but the $1 verification hold was not released.
       $this->log('Verification hold not voided: ' . $response['void_error'], 'error');
       if ($order) {
-        $order->add_order_note(sprintf(__('PayArc saved the card but did not void the %1$s verification hold (%2$s). The hold expires on its own; void it in the console to release it sooner.', 'payarc-payments'), wc_price((float) \Payarc\GatewayClient::CARD_VERIFICATION_AMOUNT), $response['void_error']));
+        $order->add_order_note(sprintf(__('PayArc saved the card but did not void the %1$s verification hold (%2$s). The hold expires on its own after seven days.', 'payarc-payments'), wc_price((float) \Payarc\GatewayClient::CARD_VERIFICATION_AMOUNT), $response['void_error']));
       }
     }
     return ['response' => $response];
@@ -900,8 +982,8 @@ final class Gateway extends \WC_Payment_Gateway {
     }
   }
 
-  private function metadata(\WC_Order $order, string $orderId): array {
-    $payer = [
+  private function payer(\WC_Order $order): array {
+    return [
       'email' => (string) $order->get_billing_email(),
       'first_name' => (string) $order->get_billing_first_name(),
       'last_name' => (string) $order->get_billing_last_name(),
@@ -913,48 +995,39 @@ final class Gateway extends \WC_Payment_Gateway {
       'postcode' => (string) $order->get_billing_postcode(),
       'country' => (string) $order->get_billing_country(),
     ];
-    $metadata = $this->shared()->metadata(
+  }
+
+  private function chargeOptions(\WC_Order $order, bool $recurring = FALSE): array {
+    $options = $this->shared()->chargeOptions(
       'WC-' . $order->get_order_number(),
       sprintf(__('%1$s order %2$s', 'payarc-payments'), wp_specialchars_decode(get_bloginfo('name'), ENT_QUOTES), $order->get_order_number()),
-      $payer,
-      ['currency' => $order->get_currency(), 'orderid' => $orderId]
+      $this->payer($order),
+      ['recurring' => $recurring]
     );
+    // The customer's IP from the order: renewals run without a browser.
+    unset($options['metadata']['client_ip']);
     $ip = (string) $order->get_customer_ip_address();
-    if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP)) {
-      $metadata['clientip'] = $ip;
+    if (!$recurring && $ip !== '' && filter_var($ip, FILTER_VALIDATE_IP)) {
+      $options['metadata']['client_ip'] = $ip;
     }
-    return $metadata;
+    return $options;
   }
 
   public function gatewayNote(array $response): string {
-    $parts = [sprintf(__('PayArc reference %s', 'payarc-payments'), Shared::transactionReference($response))];
-    if (!empty($response['refnum'])) {
-      $parts[] = sprintf(__('refnum %s', 'payarc-payments'), $response['refnum']);
-    }
-    if (!empty($response['authcode'])) {
-      $parts[] = sprintf(__('auth code %s', 'payarc-payments'), $response['authcode']);
-    }
-    if (!empty($response['avs']['result'])) {
-      $parts[] = sprintf(__('AVS: %s', 'payarc-payments'), $response['avs']['result']);
-    }
-    if (!empty($response['cvc']['result'])) {
-      $parts[] = sprintf(__('CVV: %s', 'payarc-payments'), $response['cvc']['result']);
-    }
+    $note = Shared::note($response, $this->settings()->isSandbox());
     $card = Shared::card($response);
     if ($card['last4']) {
-      $parts[] = self::summary($card);
+      $note = rtrim($note, '.') . ', ' . self::summary($card) . '.';
     }
-    if ($this->settings()->isSandbox()) {
-      $parts[] = __('SANDBOX transaction', 'payarc-payments');
-    }
-    return implode(', ', $parts) . '.';
+    return $note;
   }
 
   public static function summary(array $card): string {
+    $brand = (string) ($card['brand'] ?? '');
     if (empty($card['last4'])) {
-      return (string) ($card['brand'] ?: __('Card', 'payarc-payments'));
+      return $brand !== '' ? $brand : __('Card', 'payarc-payments');
     }
-    return sprintf(__('%1$s ending in %2$s', 'payarc-payments'), $card['brand'] ?: __('Card', 'payarc-payments'), $card['last4']);
+    return sprintf(__('%1$s ending in %2$s', 'payarc-payments'), $brand !== '' ? $brand : __('Card', 'payarc-payments'), $card['last4']);
   }
 
   public static function money(float $amount): string {

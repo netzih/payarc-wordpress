@@ -1,7 +1,7 @@
 /* global PayarcHostedFields */
 /**
- * WooCommerce block checkout payment method. Mounts the Pay.js hosted card
- * fields and, in onPaymentSetup, tokenizes them into paymentMethodData that
+ * WooCommerce block checkout payment method. Mounts the PayArc Hosted Fields
+ * and, in onPaymentSetup, tokenizes them into paymentMethodData that
  * the Store API copies into $_POST for the gateway's process_payment().
  */
 (function (window) {
@@ -15,7 +15,7 @@
   var settings = wcSettings.getPaymentMethodData ? wcSettings.getPaymentMethodData('payarc', {}) : wcSettings.getSetting('payarc_data', {});
   var CONTAINER_ID = 'payarc-wc-blocks-card';
   var ERRORS_ID = 'payarc-wc-blocks-errors';
-  var APPLE_ID = 'payarc-wc-blocks-apple-pay';
+  var WALLETS_ID = 'payarc-wc-blocks-wallets';
   var mounted = null;
 
   function t(key, fallback) {
@@ -39,8 +39,8 @@
     }
     container.dataset.payarcMounted = '1';
     return PayarcHostedFields.mount({
-      publicKey: settings.publicKey,
-      payJsUrl: settings.payJsUrl,
+      clientId: settings.clientId,
+      scriptUrl: settings.scriptUrl,
       container: container,
       onFieldError: showError
     }).then(function (result) {
@@ -57,41 +57,39 @@
     var eventRegistration = props.eventRegistration;
     var emitResponse = props.emitResponse;
     var billing = props.billing || {};
-    var applePayKey = element.useRef('');
+    var walletToken = element.useRef('');
 
     element.useEffect(function () {
       if (!settings.configured) {
         showError(t('notConfigured', 'The payment form is not configured.'));
         return;
       }
-      mount().then(function (result) {
-        if (!settings.applePay || !settings.applePay.enabled) {
+      mount().then(function () {
+        var wrapper = document.getElementById(WALLETS_ID);
+        if (!wrapper || !settings.wallets || !settings.wallets.length) {
           return;
         }
-        PayarcHostedFields.applePay({
-          client: result.client,
-          targetDiv: APPLE_ID + '-button',
-          displayName: settings.applePay.displayName,
-          countryCode: settings.applePay.countryCode,
-          currencyCode: settings.applePay.currencyCode,
-          buttonType: 'buy',
+        PayarcHostedFields.wallets({
+          clientId: settings.clientId,
+          scriptUrl: settings.scriptUrl,
+          targetDiv: wrapper.querySelector('.payarc-wallet-buttons'),
+          wallets: settings.wallets,
           getAmount: function () {
             var total = billing.cartTotal ? Number(billing.cartTotal.value) : 0;
             var minor = billing.currency && typeof billing.currency.minorUnit === 'number' ? billing.currency.minorUnit : 2;
             var amount = total / Math.pow(10, minor);
             return amount > 0 ? amount.toFixed(2) : '0.00';
           },
-          onKey: function (key) {
-            applePayKey.current = key;
+          onKey: function (token) {
+            walletToken.current = token;
             if (props.onSubmit) {
               props.onSubmit();
             }
           },
           onError: showError,
           onCancel: function () { showError(''); }
-        }).then(function (entry) {
-          var wrapper = document.getElementById(APPLE_ID);
-          if (wrapper && entry) {
+        }).then(function (row) {
+          if (row) {
             wrapper.hidden = false;
           }
         });
@@ -102,21 +100,21 @@
     element.useEffect(function () {
       var unsubscribe = eventRegistration.onPaymentSetup(async function () {
         try {
-          var key = applePayKey.current;
-          applePayKey.current = '';
-          if (!key) {
+          var token = walletToken.current;
+          walletToken.current = '';
+          if (!token) {
             if (!settings.configured) {
               throw new Error(t('notConfigured', 'The payment form is not configured.'));
             }
             var handles = await mount();
-            key = await PayarcHostedFields.tokenize(handles);
+            token = await PayarcHostedFields.tokenize(handles);
           }
           showError('');
           return {
             type: emitResponse.responseTypes.SUCCESS,
             meta: {
               paymentMethodData: {
-                payarc_payment_key: key,
+                payarc_token: token,
                 'wc-payarc-payment-token': 'new'
               }
             }
@@ -137,9 +135,9 @@
 
     return h('div', { className: 'payarc-wc-fields' },
       settings.description ? h('p', null, decode(settings.description)) : null,
-      h('div', { id: APPLE_ID, className: 'payarc-apple-pay', hidden: true },
-        h('div', { id: APPLE_ID + '-button', className: 'payarc-apple-pay-button' }),
-        h('div', { className: 'payarc-apple-pay-divider' }, h('span', null, t('orCard', 'or enter card details')))
+      h('div', { id: WALLETS_ID, className: 'payarc-wallets-wrapper', hidden: true },
+        h('div', { className: 'payarc-wallet-buttons' }),
+        h('div', { className: 'payarc-wallet-divider' }, h('span', null, t('orCard', 'or enter card details')))
       ),
       h('div', { id: CONTAINER_ID, className: 'payarc-card-element', 'aria-label': 'Secure card details' }),
       h('div', { id: ERRORS_ID, className: 'payarc-card-errors', role: 'alert', 'aria-live': 'polite' }),

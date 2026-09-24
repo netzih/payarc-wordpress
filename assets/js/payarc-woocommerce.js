@@ -1,7 +1,7 @@
 /* global jQuery, PayarcHostedFields, payarc_woocommerce_params */
 /**
  * WooCommerce classic checkout, Pay for Order and Add Payment Method pages.
- * Mounts the Pay.js hosted card fields into #payarc-wc-card whenever the
+ * Mounts the PayArc Hosted Fields into #payarc-wc-card whenever the
  * payment area is (re)rendered and tokenizes before the form is submitted.
  */
 (function ($, window) {
@@ -19,7 +19,7 @@
   }
 
   function keyInput() {
-    return $('#payarc_payment_key');
+    return $('#payarc_token');
   }
 
   function usingSavedCard() {
@@ -47,13 +47,13 @@
       return Promise.reject(new Error('not configured'));
     }
     return PayarcHostedFields.mount({
-      publicKey: cfg.publicKey,
-      payJsUrl: cfg.payJsUrl,
+      clientId: cfg.clientId,
+      scriptUrl: cfg.scriptUrl,
       container: container,
       onFieldError: showError
     }).then(function (result) {
       mounted = result;
-      mountApplePay(result);
+      mountWallets();
       return result;
     }).catch(function (error) {
       mounted = null;
@@ -68,28 +68,27 @@
     return number > 0 ? number.toFixed(2) : '0.00';
   }
 
-  function mountApplePay(handles) {
-    if (!cfg.applePay || !cfg.applePay.enabled || !$('#payarc-wc-apple-pay').length) {
+  function mountWallets() {
+    var wrapper = document.getElementById('payarc-wc-wallets');
+    if (!wrapper || !cfg.wallets || !cfg.wallets.length) {
       return;
     }
-    PayarcHostedFields.applePay({
-      client: handles.client,
-      targetDiv: 'payarc-wc-apple-pay-button',
-      displayName: cfg.applePay.displayName,
-      countryCode: cfg.applePay.countryCode,
-      currencyCode: cfg.applePay.currencyCode,
-      buttonType: 'buy',
+    PayarcHostedFields.wallets({
+      clientId: cfg.clientId,
+      scriptUrl: cfg.scriptUrl,
+      targetDiv: wrapper.querySelector('.payarc-wallet-buttons'),
+      wallets: cfg.wallets,
       getAmount: orderTotal,
-      onKey: function (key) {
-        keyInput().val(key);
+      onKey: function (token) {
+        keyInput().val(token);
         var form = $('form.checkout, form#order_review').first();
         form.trigger('submit');
       },
       onError: showError,
       onCancel: function () { showError(''); }
-    }).then(function (entry) {
-      if (entry) {
-        $('#payarc-wc-apple-pay').prop('hidden', false);
+    }).then(function (row) {
+      if (row) {
+        wrapper.hidden = false;
       }
     });
   }
@@ -106,8 +105,8 @@
     }
     mount().then(function (handles) {
       return PayarcHostedFields.tokenize(handles);
-    }).then(function (key) {
-      keyInput().val(key);
+    }).then(function (token) {
+      keyInput().val(token);
       showError('');
       resubmit();
     }).catch(function (error) {
@@ -128,7 +127,7 @@
     return guard(form, function () { form.trigger('submit'); });
   });
   $(document.body).on('checkout_error', function () {
-    // The key is single-use: after any error the next attempt needs a new one.
+    // The token is single-use: after any error the next attempt needs a new one.
     keyInput().val('');
   });
 
