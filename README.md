@@ -179,8 +179,11 @@ Also verified: after a refused tokenization the payer can correct the field
 and submit again, and each tokenization of a session returns a new token.
 Checkouts that do not reload the page therefore need no remount.
 
+Apple Pay was confirmed working on the live site (jewish-richmond.com,
+GiveWP) with 0.1.1 on 2026-09-24.
+
 Not yet exercised:
-- Apple Pay and Google Pay (they need a real HTTPS domain).
+- Google Pay on a real site.
 - Add Payment Method, and a WooCommerce subscription card change.
 - Partial refunds of a settled charge (the sandbox status of a batched
   charge is still being watched).
@@ -201,6 +204,13 @@ against the local site at http://localhost:8001: `gf-test.mjs`,
 and `settings-check.mjs`.
 
 ## To do
+
+- Wallet buttons: when the browser can do Apple Pay (Safari), show only the
+  Apple Pay button and hide Google Pay. At present Google Pay shows
+  everywhere. A small change in `wallets()` in
+  `assets/js/payarc-hostedfields.js`: drop `google-pay` from the list when
+  `window.ApplePaySession` exists and Apple Pay is enabled. Requested
+  2026-09-24.
 
 - Consolidate the charge/exception ladder repeated across the modules (as
   in the USAePay plugin).
