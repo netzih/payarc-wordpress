@@ -165,10 +165,18 @@
 
   function tokenError(obj) {
     var status = obj && obj.status;
+    // Seen: {"message": "..."} and, for a declined card check, a bare list
+    // such as ["Invalid CVV"] (HTTP 409, sandbox 2026-09-24).
     var message = '';
     try {
       var body = JSON.parse(obj.response || obj.responseText || '{}');
-      message = body && (body.message || body.error) || '';
+      if (Array.isArray(body)) {
+        message = body.filter(function (item) { return typeof item === 'string'; }).join(' ');
+      } else if (typeof body === 'string') {
+        message = body;
+      } else if (body) {
+        message = body.message || body.error || '';
+      }
     } catch (ignored) {
       message = '';
     }
