@@ -86,7 +86,11 @@ final class Unresolved {
       if ($state['state'] !== 'done') {
         return ['ok' => TRUE, 'message' => sprintf(__('%1$s: charge %2$s shows no refund since the request, so it never went through. Trying again is safe; the marker is cleared by that attempt.', 'payarc-payments'), $item['record'], (string) $marker['charge_id'])];
       }
-      return ['ok' => TRUE, 'message' => sprintf(__('%1$s: the refund WENT THROUGH at PayArc: charge %2$s now shows %3$s refunded (status %4$s). %5$s', 'payarc-payments'), $item['record'], (string) $marker['charge_id'], \Payarc\Amount::fromCents((int) ($state['response']['amount_refunded'] ?? 0)), (string) ($state['response']['status'] ?? ''), $item['hint'])];
+      $sale = $state['response'];
+      if (in_array(strtolower((string) ($sale['status'] ?? '')), ['void', 'voided'], TRUE)) {
+        return ['ok' => TRUE, 'message' => sprintf(__('%1$s: the refund WENT THROUGH at PayArc: charge %2$s was voided in full (it had not settled). %3$s', 'payarc-payments'), $item['record'], (string) $marker['charge_id'], $item['hint'])];
+      }
+      return ['ok' => TRUE, 'message' => sprintf(__('%1$s: the refund WENT THROUGH at PayArc: charge %2$s now shows %3$s refunded. %4$s', 'payarc-payments'), $item['record'], (string) $marker['charge_id'], \Payarc\Amount::fromCents((int) ($sale['amount_refunded'] ?? 0)), $item['hint'])];
     }
     if ($state['state'] !== 'done') {
       return ['ok' => TRUE, 'message' => sprintf(__('%1$s: PayArc has no approved charge with reference %2$s since the request, so it never went through. Trying again is safe; the marker is cleared by that attempt.', 'payarc-payments'), $item['record'], $item['reference'])];
