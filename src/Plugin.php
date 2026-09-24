@@ -11,7 +11,7 @@ use Payarc\DonorMessage;
  */
 final class Plugin {
 
-  public const VERSION = '0.1.0';
+  public const VERSION = '0.1.1';
 
   public const SLUG = 'payarc-payments';
 
@@ -203,6 +203,9 @@ final class Plugin {
       'applePay' => __('Pay with Apple Pay', 'payarc-payments'),
       'googlePay' => __('Pay with Google Pay', 'payarc-payments'),
       'chooseAmount' => __('Please choose an amount before paying with a wallet.', 'payarc-payments'),
+      'walletTotal' => __('Total', 'payarc-payments'),
+      'applePayHint' => __('Tap the Apple Pay button to pay.', 'payarc-payments'),
+      'googlePayHint' => __('Tap the Google Pay button to pay.', 'payarc-payments'),
     ]]);
   }
 

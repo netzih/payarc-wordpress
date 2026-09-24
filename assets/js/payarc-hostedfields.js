@@ -321,6 +321,37 @@
     });
   }
 
+  // Styles for the wallet window. PayArc prefixes every selector with its
+  // wrapper and rejects CSS containing url(), content: or @import.
+  var WALLET_WINDOW_CSS = [
+    '.payarc-wallet-window { padding: 28px 20px; text-align: center; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #1d2327; }',
+    '.payarc-wallet-total { margin: 0 0 6px; font-size: 22px; font-weight: 600; }',
+    '.payarc-wallet-hint { margin: 0 0 18px; font-size: 15px; color: #50575e; }',
+    '#apple-pay-placeholder, #google-pay-placeholder { width: 100%; min-height: 48px; }'
+  ].join('\n');
+
+  function escapeHtml(text) {
+    return String(text).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  /**
+   * The page shown in PayArc's wallet window: the total, a hint to tap the
+   * button, and the placeholder PayArc puts its wallet button into.
+   */
+  function walletWindowHtml(wallet, amount) {
+    var placeholder = wallet === 'apple-pay' ? 'apple-pay-placeholder' : 'google-pay-placeholder';
+    var hint = wallet === 'apple-pay'
+      ? t('applePayHint', 'Tap the Apple Pay button to pay.')
+      : t('googlePayHint', 'Tap the Google Pay button to pay.');
+    return '<div class="payarc-wallet-window">'
+      + '<p class="payarc-wallet-total">' + escapeHtml(t('walletTotal', 'Total') + ': $' + Number(amount).toFixed(2)) + '</p>'
+      + '<p class="payarc-wallet-hint">' + escapeHtml(hint) + '</p>'
+      + '<div id="' + placeholder + '"></div>'
+      + '</div>';
+  }
+
   /**
    * Apple Pay / Google Pay buttons for one-time payments. PayArc opens its
    * own window for the wallet sheet (no Apple merchant setup on this site)
@@ -367,6 +398,11 @@
             api_key: options.clientId,
             selectedWallet: wallet,
             enabledWallets: [wallet],
+            // PayArc's window shows a wallet button only where this HTML has
+            // its placeholder div (id apple-pay-placeholder or
+            // google-pay-placeholder); without it the window stays empty.
+            html: walletWindowHtml(wallet, amount),
+            css: WALLET_WINDOW_CSS,
             windowWidth: 420,
             windowHeight: 520,
             onWindowOpened: function () {
