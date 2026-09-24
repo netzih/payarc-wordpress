@@ -1,0 +1,61 @@
+/* The Pay.js iframe is sized as height:100% of its container, and the card
+   row inside it is a single flex line, so the container needs a fixed height
+   or the iframe falls back to the browser default of 150px.
+
+   Every rule is written twice: once bare (GiveWP, WooCommerce) and once scoped
+   to the Gravity Forms container. The Gravity Forms Orbital theme loads a reset
+   after this file that applies `all: unset` to every element inside
+   `.gform-theme--framework` through a `:where()` selector, which has the same
+   single-class specificity as `.payarc-card-element` and therefore wins on
+   load order. The two-class selectors outrank it. */
+.payarc-card-element,
+.ginput_container_payarc_card .payarc-card-element {
+  box-sizing: border-box;
+  height: 44px;
+  max-width: 520px;
+  padding: 0 8px;
+  border: 1px solid #8c8f94;
+  border-radius: 4px;
+  background: #fff;
+  overflow: hidden;
+}
+.payarc-card-element iframe,
+.ginput_container_payarc_card .payarc-card-element iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+.payarc-card-element:focus-within,
+.ginput_container_payarc_card .payarc-card-element:focus-within {
+  border-color: #2271b1;
+  box-shadow: 0 0 0 1px #2271b1;
+}
+.payarc-card-errors,
+.ginput_container_payarc_card .payarc-card-errors { display: block; max-width: 520px; margin-top: 8px; color: #b32d2e; }
+.payarc-card-errors:empty,
+.ginput_container_payarc_card .payarc-card-errors:empty { display: none; }
+.payarc-card-note,
+.ginput_container_payarc_card .payarc-card-note { display: block; max-width: 520px; margin-top: 8px; font-size: 0.9em; opacity: 0.8; }
+
+.payarc-apple-pay,
+.ginput_container_payarc_card .payarc-apple-pay { display: block; max-width: 520px; margin-bottom: 12px; }
+.payarc-apple-pay[hidden],
+.ginput_container_payarc_card .payarc-apple-pay[hidden] { display: none; }
+.payarc-apple-pay-button,
+.ginput_container_payarc_card .payarc-apple-pay-button { display: block; min-height: 40px; }
+.payarc-apple-pay-button .apple-pay-button,
+.ginput_container_payarc_card .payarc-apple-pay-button .apple-pay-button { width: 100%; height: 44px; border-radius: 4px; cursor: pointer; }
+.payarc-apple-pay-divider,
+.ginput_container_payarc_card .payarc-apple-pay-divider { display: flex; align-items: center; margin: 12px 0 0; color: #646970; font-size: 0.9em; }
+.payarc-apple-pay-divider::before,
+.payarc-apple-pay-divider::after,
+.ginput_container_payarc_card .payarc-apple-pay-divider::before,
+.ginput_container_payarc_card .payarc-apple-pay-divider::after { content: ""; flex: 1; border-top: 1px solid #c3c4c7; }
+.payarc-apple-pay-divider span,
+.ginput_container_payarc_card .payarc-apple-pay-divider span { display: inline; padding: 0 10px; }
+
+/* Form editor preview of the hosted fields */
+.payarc-card-element--preview { display: flex; gap: 16px; align-items: center; color: #757575; font-size: 15px; }
+.payarc-card-element--preview span:first-child { flex: 1; }
+.payarc-card-note--warning { color: #b32d2e; opacity: 1; font-weight: 600; }
