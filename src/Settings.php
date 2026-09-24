@@ -22,21 +22,19 @@ final class Settings {
 
   public const DEFAULT_ACCOUNT = 'default';
 
-  private const CREDENTIALS = ['live_api_key', 'live_api_pin', 'live_public_key', 'sandbox_api_key', 'sandbox_api_pin', 'sandbox_public_key'];
+  private const CREDENTIALS = ['live_bearer_token', 'live_client_id', 'sandbox_bearer_token', 'sandbox_client_id'];
 
   private ?array $values = NULL;
 
   public static function defaults(): array {
     return [
       'mode' => self::MODE_SANDBOX,
-      'live_api_key' => '',
-      'live_api_pin' => '',
-      'live_public_key' => '',
-      'sandbox_api_key' => '',
-      'sandbox_api_pin' => '',
-      'sandbox_public_key' => '',
+      'live_bearer_token' => '',
+      'live_client_id' => '',
+      'sandbox_bearer_token' => '',
+      'sandbox_client_id' => '',
       'apple_pay' => FALSE,
-      'apple_pay_display_name' => '',
+      'google_pay' => FALSE,
       'debug_log' => FALSE,
       'accounts' => [],
     ];
@@ -118,53 +116,62 @@ final class Settings {
     return (string) ($this->extraAccounts()[$account][$key] ?? '');
   }
 
-  public function apiKey(?string $mode = NULL, ?string $account = NULL): string {
-    return trim($this->credential('api_key', $mode, $account));
-  }
-
-  public function apiPin(?string $mode = NULL, ?string $account = NULL): string {
-    return $this->credential('api_pin', $mode, $account);
-  }
-
-  public function publicKey(?string $mode = NULL, ?string $account = NULL): string {
-    return trim($this->credential('public_key', $mode, $account));
+  /**
+   * The secret API bearer token (PayArc dashboard > API). Server-side only.
+   */
+  public function bearerToken(?string $mode = NULL, ?string $account = NULL): string {
+    return trim($this->credential('bearer_token', $mode, $account));
   }
 
   /**
-   * The API key and PIN are present: server-side calls (charges, refunds,
+   * The public Client ID that Hosted Fields use in the browser.
+   */
+  public function clientId(?string $mode = NULL, ?string $account = NULL): string {
+    return trim($this->credential('client_id', $mode, $account));
+  }
+
+  /**
+   * The bearer token is present: server-side calls (charges, refunds,
    * renewals) can be made.
    */
   public function hasApiCredentials(?string $mode = NULL, ?string $account = NULL): bool {
-    return $this->apiKey($mode, $account) !== '' && $this->apiPin($mode, $account) !== '';
+    return $this->bearerToken($mode, $account) !== '';
   }
 
   /**
-   * Everything a checkout needs: API credentials plus the Pay.js public key
-   * the browser uses to tokenize cards.
+   * Everything a checkout needs: the bearer token plus the Client ID the
+   * browser uses to tokenize cards.
    */
   public function isConfigured(?string $mode = NULL, ?string $account = NULL): bool {
-    return $this->hasApiCredentials($mode, $account) && $this->publicKey($mode, $account) !== '';
+    return $this->hasApiCredentials($mode, $account) && $this->clientId($mode, $account) !== '';
   }
 
   public function apiUrl(?string $mode = NULL): string {
     return ($mode ?? $this->mode()) === self::MODE_SANDBOX
-      ? 'https://sandbox.payarc.com/api/v2'
-      : 'https://secure.payarc.com/api/v2';
+      ? \Payarc\GatewayClient::SANDBOX_URL
+      : \Payarc\GatewayClient::LIVE_URL;
   }
 
-  public function payJsUrl(?string $mode = NULL): string {
+  /**
+   * PayArc's Hosted Fields script. It works out its own host (test or live
+   * portal) from this URL.
+   */
+  public function hostedFieldsUrl(?string $mode = NULL): string {
     return ($mode ?? $this->mode()) === self::MODE_SANDBOX
-      ? 'https://sandbox.payarc.com/js/v2/pay.js'
-      : 'https://www.payarc.com/js/v2/pay.js';
+      ? 'https://testportal.payarc.net/js/iframeprocess.js'
+      : 'https://portal.payarc.net/js/iframeprocess.js';
   }
 
   public function applePayEnabled(): bool {
     return !empty($this->get('apple_pay'));
   }
 
-  public function applePayDisplayName(): string {
-    $name = trim((string) $this->get('apple_pay_display_name'));
-    return $name !== '' ? $name : wp_specialchars_decode(get_bloginfo('name'), ENT_QUOTES);
+  public function googlePayEnabled(): bool {
+    return !empty($this->get('google_pay'));
+  }
+
+  public function walletsEnabled(): bool {
+    return $this->applePayEnabled() || $this->googlePayEnabled();
   }
 
   public function debugLog(): bool {
@@ -181,21 +188,20 @@ final class Settings {
 
     $clean['mode'] = ($input['mode'] ?? '') === self::MODE_LIVE ? self::MODE_LIVE : self::MODE_SANDBOX;
     foreach (['live', 'sandbox'] as $mode) {
-      foreach (['api_key', 'public_key'] as $field) {
-        $clean[$mode . '_' . $field] = sanitize_text_field((string) ($input[$mode . '_' . $field] ?? ''));
+      $clean[$mode . '_client_id'] = sanitize_text_field((string) ($input[$mode . '_client_id'] ?? ''));
+      // A blank token field keeps the stored token, so re-saving other
+      // settings never wipes it; the form shows a placeholder when one is
+      // stored.
+      $token = trim((string) ($input[$mode . '_bearer_token'] ?? ''));
+      if ($token !== '') {
+        $clean[$mode . '_bearer_token'] = preg_replace('/\\s+/', '', $token);
       }
-      // A blank PIN field keeps the stored PIN, so re-saving other settings
-      // never wipes it; the form shows a placeholder when one is stored.
-      $pin = (string) ($input[$mode . '_api_pin'] ?? '');
-      if ($pin !== '') {
-        $clean[$mode . '_api_pin'] = trim($pin);
-      }
-      if (!empty($input[$mode . '_clear_pin'])) {
-        $clean[$mode . '_api_pin'] = '';
+      if (!empty($input[$mode . '_clear_token'])) {
+        $clean[$mode . '_bearer_token'] = '';
       }
     }
     $clean['apple_pay'] = !empty($input['apple_pay']);
-    $clean['apple_pay_display_name'] = sanitize_text_field((string) ($input['apple_pay_display_name'] ?? ''));
+    $clean['google_pay'] = !empty($input['google_pay']);
     $clean['debug_log'] = !empty($input['debug_log']);
     $clean['accounts'] = self::sanitizeAccounts($input['accounts'] ?? [], $this->extraAccounts());
 
@@ -206,9 +212,9 @@ final class Settings {
   /**
    * Rows of the "Additional accounts" table. A row keeps its id once saved
    * (records that were charged through it refer to it); a new row gets one
-   * from its label. A blank PIN keeps the stored one, as for the default
-   * account. Rows marked for removal and rows with no label and no key are
-   * dropped.
+   * from its label. A blank bearer token keeps the stored one, as for the
+   * default account. Rows marked for removal and rows with no label and no
+   * credentials are dropped.
    *
    * @param array<string, array> $current
    *   The stored accounts by id.
@@ -225,16 +231,14 @@ final class Settings {
       $existing = $id !== '' && isset($current[$id]) ? $current[$id] : NULL;
       $account = ['id' => '', 'label' => $label];
       foreach (['live', 'sandbox'] as $mode) {
-        foreach (['api_key', 'public_key'] as $field) {
-          $account[$mode . '_' . $field] = sanitize_text_field((string) ($row[$mode . '_' . $field] ?? ''));
-        }
-        $pin = trim((string) ($row[$mode . '_api_pin'] ?? ''));
-        $account[$mode . '_api_pin'] = $pin !== '' ? $pin : (string) ($existing[$mode . '_api_pin'] ?? '');
-        if (!empty($row[$mode . '_clear_pin'])) {
-          $account[$mode . '_api_pin'] = '';
+        $account[$mode . '_client_id'] = sanitize_text_field((string) ($row[$mode . '_client_id'] ?? ''));
+        $token = preg_replace('/\\s+/', '', (string) ($row[$mode . '_bearer_token'] ?? ''));
+        $account[$mode . '_bearer_token'] = $token !== '' ? $token : (string) ($existing[$mode . '_bearer_token'] ?? '');
+        if (!empty($row[$mode . '_clear_token'])) {
+          $account[$mode . '_bearer_token'] = '';
         }
       }
-      if ($label === '' && $account['live_api_key'] === '' && $account['sandbox_api_key'] === '') {
+      if ($label === '' && $account['live_bearer_token'] === '' && $account['sandbox_bearer_token'] === '' && $account['live_client_id'] === '' && $account['sandbox_client_id'] === '') {
         continue;
       }
       if ($existing === NULL) {

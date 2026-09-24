@@ -3,6 +3,7 @@
 namespace Payarc\WordPress;
 
 use Payarc\AmbiguousGatewayException;
+use Payarc\Charge;
 use Payarc\GatewayClient;
 use Payarc\GatewayException;
 use Payarc\ReconciliationInconclusiveException;
@@ -10,13 +11,21 @@ use Payarc\ReconciliationInconclusiveException;
 /**
  * Runs a gateway call at most once per stored marker.
  *
- * The marker ({orderid, sent_at, amount, exclude}) is written by the caller's
- * store BEFORE the request goes out and stays there until the answer was
- * conclusive and, for an approval, until the caller has recorded it. A later
- * call with the same store finds the marker, looks the orderid up (bounded by
- * when it was sent, so a miss is conclusive) and returns the earlier
- * transaction instead of sending a second one. When PayArc cannot say,
- * nothing is sent.
+ * The marker ({orderid, key, sent_at, amount, kind, ...}) is written by the
+ * caller's store BEFORE the request goes out and stays there until the answer
+ * was conclusive and, for an approval, until the caller has recorded it.
+ *
+ * Every request carries the marker's key as PayArc's Idempotency-Key, and
+ * PayArc answers a repeated key with the original result, whatever the new
+ * body says (verified in the sandbox, 2026-09-24). So:
+ * - A lost answer is recovered by sending the same request again at once.
+ * - A later attempt that finds a recent marker sends again with the stored
+ *   key: an earlier charge comes back instead of a second one being made.
+ * - An older marker (key retention is not documented) is settled by looking
+ *   the charge up by its reference; a refund marker by comparing the sale's
+ *   refunded amount with what it was before the refund was sent.
+ * A definitive answer (decline, refusal) clears the marker, so the next
+ * attempt gets a new key: PayArc would otherwise replay the old decline.
  *
  * Reading the marker, writing it and sending the request happen under a lock
  * on the orderid (Lock, whose INSERT is the test), so two requests made at the
@@ -25,6 +34,16 @@ use Payarc\ReconciliationInconclusiveException;
  * keep it would leave the request unguarded.
  */
 final class Reconcile {
+
+  public const CHARGE = 'charge';
+
+  public const REFUND = 'refund';
+
+  /**
+   * How long an idempotency key is trusted to be replayed. PayArc does not
+   * document how long it keeps them; older markers are looked up instead.
+   */
+  public const REPLAY_WINDOW = 3600;
 
   /**
    * Longer than a request plus the lookups that may follow it. A holder that
@@ -47,19 +66,19 @@ final class Reconcile {
    *   Returns the stored marker array, or anything else when none.
    * @param callable(?array): void $write
    *   Stores a marker, or removes it when given NULL.
-   * @param callable(GatewayClient): array $call
-   *   The gateway request.
-   * @param string[] $types
-   *   Transaction types that count as "this request went through":
-   *   GatewayClient::TYPES_CHARGE or TYPES_REFUND. Refunds inherit the sale's
-   *   orderid, so for them $orderId is the sale's, and the refunds the sale
-   *   already had are listed before sending and excluded from later lookups:
-   *   only a refund that was not there before can be the one sent now.
+   * @param string $orderId
+   *   Our reference for the record being charged or refunded; the key is
+   *   derived from it.
+   * @param callable(GatewayClient, string): array $call
+   *   The gateway request; the second argument is the idempotency key to
+   *   send as its 'reference'.
+   * @param string $kind
+   *   self::CHARGE, or self::REFUND with $chargeId set to the sale.
    *
    * @return array{response: array, reconciled: bool, amount: ?string}
-   *   'reconciled' is TRUE when the response is an earlier transaction found
-   *   at PayArc rather than the answer to a request made now; 'amount' is
-   *   then the amount that earlier request was made for.
+   *   'reconciled' is TRUE when the response is an earlier request's result
+   *   rather than the answer to a request made now; 'amount' is then the
+   *   amount that earlier request was made for.
    *
    * @throws BusyException
    *   Another request for the same orderid is in progress; nothing was sent.
@@ -67,79 +86,178 @@ final class Reconcile {
    *   PayArc could not be asked whether an earlier request went through;
    *   nothing was sent. The caller must not retry blindly.
    * @throws AmbiguousGatewayException
-   *   The request was sent and no answer came; the marker stays for next time.
+   *   The request was sent and no conclusive answer came; the marker stays
+   *   for next time.
    * @throws GatewayException
    */
-  public static function once(GatewayClient $client, callable $read, callable $write, string $orderId, ?string $amount, callable $call, array $types = GatewayClient::TYPES_CHARGE): array {
+  public static function once(GatewayClient $client, callable $read, callable $write, string $orderId, ?string $amount, callable $call, string $kind = self::CHARGE, ?string $chargeId = NULL): array {
+    if ($kind === self::REFUND && ($chargeId === NULL || trim($chargeId) === '')) {
+      throw new \InvalidArgumentException('A refund needs the charge it refunds.');
+    }
     $lockName = 'reconcile_' . md5($orderId);
     $lock = Lock::acquire($lockName, self::LOCK_TTL);
     if ($lock === NULL) {
       throw new BusyException(sprintf('Another request for %s is still in progress.', $orderId));
     }
     try {
-      return self::onceLocked($client, $read, $write, $orderId, $amount, $call, $types);
+      return self::onceLocked($client, $read, $write, $orderId, $amount, $call, $kind, $chargeId);
     }
     finally {
       Lock::release($lockName, $lock);
     }
   }
 
-  private static function onceLocked(GatewayClient $client, callable $read, callable $write, string $orderId, ?string $amount, callable $call, array $types): array {
+  private static function onceLocked(GatewayClient $client, callable $read, callable $write, string $orderId, ?string $amount, callable $call, string $kind, ?string $chargeId): array {
     $marker = $read();
-    if (is_array($marker) && !empty($marker['orderid'])) {
-      // Look for what was actually sent then, not what is asked for now.
+    if (is_array($marker) && !empty($marker['key'])) {
       $earlierAmount = isset($marker['amount']) && $marker['amount'] !== '' ? (string) $marker['amount'] : $amount;
-      $exclude = isset($marker['exclude']) && is_array($marker['exclude']) ? $marker['exclude'] : [];
-      $found = self::lookup($client, (string) $marker['orderid'], ((int) ($marker['sent_at'] ?? 0)) ?: NULL, $earlierAmount, $types, $exclude);
-      if ($found && Gateway::approved($found)) {
-        return ['response' => $found, 'reconciled' => TRUE, 'amount' => $earlierAmount];
+      $state = self::earlier($client, $marker, $kind);
+      if ($state['state'] === 'done') {
+        return ['response' => $state['response'], 'reconciled' => TRUE, 'amount' => $earlierAmount];
       }
-      // Declined, or provably never received: a fresh request is safe.
+      if ($state['state'] === 'replay') {
+        // Same key: PayArc returns the earlier result, or makes this request
+        // now if the earlier one never arrived.
+        $result = self::send($client, $write, (string) $marker['key'], $call, $kind);
+        $replayed = self::isEarlier($result, (int) ($marker['sent_at'] ?? 0));
+        return ['response' => $result, 'reconciled' => $replayed, 'amount' => $replayed ? $earlierAmount : $amount];
+      }
+      // 'absent': the earlier request provably did nothing.
     }
-    $exclude = [];
-    if ($types === GatewayClient::TYPES_REFUND) {
-      // Every refund of the sale carries its orderid; remember the ones that
-      // exist now so a later lookup accepts only one that appeared after this.
-      try {
-        $exclude = array_values(array_filter(array_map(static fn(array $row) => (string) ($row['key'] ?? ''), self::lookupAll($client, $orderId, time(), NULL, $types))));
-      }
-      catch (ReconciliationInconclusiveException $e) {
-        // Too many newer transactions to list them all. A later lookup for
-        // this marker would run into the same wall and be inconclusive too,
-        // so the marker without the list protects as much as it can.
-        $exclude = NULL;
-      }
+
+    $marker = [
+      'orderid' => $orderId,
+      'key' => self::newKey($orderId),
+      'sent_at' => time(),
+      'amount' => $amount,
+      'kind' => $kind,
+    ];
+    if ($kind === self::REFUND) {
+      // What the sale looked like before this refund, so a lost answer can
+      // be settled later by comparing (see earlier()).
+      $before = $client->getCharge((string) $chargeId);
+      $marker['charge_id'] = (string) $chargeId;
+      $marker['refunded_before'] = (int) ($before['amount_refunded'] ?? 0);
+      $marker['remaining_before'] = Charge::remainingCents($before);
     }
-    $marker = ['orderid' => $orderId, 'sent_at' => time(), 'amount' => $amount, 'exclude' => $exclude];
     $write($marker);
     $stored = $read();
-    if (!is_array($stored) || (string) ($stored['orderid'] ?? '') !== $orderId || (int) ($stored['sent_at'] ?? 0) !== $marker['sent_at']) {
+    if (!is_array($stored) || (string) ($stored['key'] ?? '') !== $marker['key']) {
       throw new \RuntimeException(sprintf('The record of the request for %s could not be stored, so it was not sent.', $orderId));
     }
+    return ['response' => self::send($client, $write, $marker['key'], $call, $kind), 'reconciled' => FALSE, 'amount' => $amount];
+  }
+
+  /**
+   * Send with the key; resend once at once if the answer was lost.
+   */
+  private static function send(GatewayClient $client, callable $write, string $key, callable $call, string $kind): array {
     try {
-      $response = $call($client);
+      try {
+        $response = $call($client, $key);
+      }
+      catch (AmbiguousGatewayException $e) {
+        $response = $call($client, $key);
+      }
     }
     catch (AmbiguousGatewayException $e) {
-      try {
-        $found = self::lookup($client, $orderId, time(), $amount, $types, $exclude ?? []);
-      }
-      catch (ReconciliationInconclusiveException $lookup) {
-        $found = NULL;
-      }
-      if ($found && Gateway::approved($found)) {
-        return ['response' => $found, 'reconciled' => TRUE, 'amount' => $amount];
-      }
       throw $e;
     }
     catch (GatewayException | \InvalidArgumentException $e) {
-      // The gateway answered (or the request never left): nothing happened.
+      // PayArc answered (or the request never left): nothing happened.
       $write(NULL);
       throw $e;
     }
-    if (!Gateway::approved($response)) {
-      $write(NULL);
+
+    $outcome = Charge::outcome($response);
+    if ($kind === self::REFUND) {
+      if (in_array($outcome, [Charge::REVERSED, Charge::APPROVED], TRUE)) {
+        return $response;
+      }
+      throw new AmbiguousGatewayException(sprintf('PayArc answered the refund with status "%s".', (string) ($response['status'] ?? '')), 0, $response);
     }
-    return ['response' => $response, 'reconciled' => FALSE, 'amount' => $amount];
+    switch ($outcome) {
+      case Charge::APPROVED:
+        return $response;
+
+      case Charge::DECLINED:
+        $write(NULL);
+        return $response;
+
+      case Charge::PARTIAL:
+        // Approved for less than asked: give it back and treat as declined.
+        try {
+          $client->void(Charge::id($response), 'other', 'Partially approved');
+          $write(NULL);
+        }
+        catch (\Throwable $e) {
+          // The marker stays; staff see it under Unresolved requests.
+        }
+        return ['failure_code' => 'PARTIAL', 'failure_message' => 'Partially approved, voided'] + $response;
+
+      default:
+        throw new AmbiguousGatewayException(sprintf('PayArc answered with status "%s" (%s), which does not say whether the card was charged.', (string) ($response['status'] ?? ''), Charge::failureCode($response)), 0, $response);
+    }
+  }
+
+  /**
+   * What became of the request a marker was written for.
+   *
+   * @return array{state: 'done', response: array}|array{state: 'replay'}|array{state: 'absent'}
+   *
+   * @throws ReconciliationInconclusiveException
+   */
+  private static function earlier(GatewayClient $client, array $marker, string $kind): array {
+    $sentAt = (int) ($marker['sent_at'] ?? 0);
+    if ($kind === self::REFUND || ($marker['kind'] ?? '') === self::REFUND) {
+      return self::earlierRefund($client, $marker);
+    }
+    if ($sentAt >= time() - self::REPLAY_WINDOW) {
+      return ['state' => 'replay'];
+    }
+    $found = self::lookup($client, (string) $marker['key'], $sentAt ?: NULL, isset($marker['amount']) && $marker['amount'] !== '' ? (string) $marker['amount'] : NULL);
+    if ($found && in_array(Charge::outcome($found), [Charge::APPROVED, Charge::REVERSED], TRUE)) {
+      return ['state' => 'done', 'response' => $found];
+    }
+    return ['state' => 'absent'];
+  }
+
+  /**
+   * A refund leaves no row of its own to find, but it changes the sale: its
+   * refunded amount grows, or it is voided. Compared with the marker's
+   * snapshot this is conclusive at any age.
+   */
+  private static function earlierRefund(GatewayClient $client, array $marker): array {
+    try {
+      $sale = $client->getCharge((string) ($marker['charge_id'] ?? ''));
+    }
+    catch (\Throwable $e) {
+      throw new ReconciliationInconclusiveException('The charge for ' . ($marker['orderid'] ?? '?') . ' could not be read: ' . $e->getMessage(), 0, [], $e);
+    }
+    $refundedNow = (int) ($sale['amount_refunded'] ?? 0);
+    $remainingNow = Charge::remainingCents($sale);
+    $remainingBefore = $marker['remaining_before'] ?? NULL;
+    if ($refundedNow > (int) ($marker['refunded_before'] ?? 0) || ($remainingBefore !== NULL && $remainingNow !== NULL && $remainingNow < (int) $remainingBefore)) {
+      return ['state' => 'done', 'response' => $sale];
+    }
+    return ['state' => 'absent'];
+  }
+
+  /**
+   * A replayed answer is the earlier charge when it was created before this
+   * attempt started (with slack for the clocks).
+   */
+  private static function isEarlier(array $response, int $sentAt): bool {
+    $created = Charge::createdTime($response);
+    return $created !== NULL && $created < time() - 60 && $sentAt > 0;
+  }
+
+  /**
+   * The orderid plus a short random part, so a new attempt after a decline
+   * is not answered with the old decline.
+   */
+  private static function newKey(string $orderId): string {
+    return substr($orderId, 0, 80) . '.' . substr(bin2hex(random_bytes(4)), 0, 6);
   }
 
   /**
@@ -176,7 +294,7 @@ final class Reconcile {
       return __('Another refund of this transaction is being processed right now. Wait a moment, then reload the page before trying again.', 'payarc-payments');
     }
     if ($e instanceof ReconciliationInconclusiveException) {
-      return sprintf(__('An earlier refund of this transaction may have gone through, and PayArc could not confirm it. Nothing was refunded now. Check transaction %1$s in the PayArc console, then try again. (%2$s)', 'payarc-payments'), $reference, $e->getMessage());
+      return sprintf(__('An earlier refund of this transaction may have gone through, and PayArc could not confirm it. Nothing was refunded now. Check charge %1$s in the PayArc dashboard, then try again. (%2$s)', 'payarc-payments'), $reference, $e->getMessage());
     }
     return sprintf(__('PayArc did not answer, so the refund may or may not have gone through. Try again in a moment: the earlier attempt is checked before anything is refunded again. (%s)', 'payarc-payments'), $e->getMessage());
   }
@@ -185,47 +303,50 @@ final class Reconcile {
    * Text when an earlier, unrecorded refund of a different amount turned up.
    */
   public static function refundMismatchMessage(string $earlierAmount, string $reference): string {
-    return sprintf(__('An earlier refund of %1$s went through at PayArc (transaction %2$s) but was never recorded here. Record that refund first, using the same amount, before refunding a different amount.', 'payarc-payments'), $earlierAmount, $reference);
+    return sprintf(__('An earlier refund of %1$s went through at PayArc (charge %2$s) but was never recorded here. Record that refund first, using the same amount, before refunding a different amount.', 'payarc-payments'), $earlierAmount, $reference);
   }
 
   /**
-   * The listed transaction for an orderid, or NULL when PayArc provably has
-   * none of that amount.
-   *
-   * @param string[] $excludeKeys
+   * The charge sent with a reference (idempotency key), or NULL when PayArc
+   * provably has none of that amount.
    *
    * @throws ReconciliationInconclusiveException
    *   When the answer is unknown, including when the lookup itself failed.
    */
-  public static function lookup(GatewayClient $client, string $orderId, ?int $sentAt, ?string $amount, array $types = GatewayClient::TYPES_CHARGE, array $excludeKeys = []): ?array {
+  public static function lookup(GatewayClient $client, string $reference, ?int $sentAt, ?string $amount): ?array {
     try {
-      return $client->findTransactionByOrderId($orderId, $sentAt, 5, $amount, $types, $excludeKeys);
+      return $client->findChargeByReference($reference, $sentAt, 5, $amount);
     }
     catch (ReconciliationInconclusiveException $e) {
       throw $e;
     }
     catch (\Throwable $e) {
-      throw new ReconciliationInconclusiveException('The lookup for ' . $orderId . ' failed: ' . $e->getMessage(), 0, [], $e);
+      throw new ReconciliationInconclusiveException('The lookup for ' . $reference . ' failed: ' . $e->getMessage(), 0, [], $e);
     }
   }
 
   /**
-   * Every listed transaction for an orderid back to the cutoff.
+   * What a stored marker's request came to, for the admin "Check at PayArc"
+   * action. Never sends anything.
    *
-   * @return array[]
+   * @return array{state: 'done'|'absent'|'pending', response?: array}
+   *   'pending': recent enough that the next attempt settles it by replaying
+   *   its key.
    *
    * @throws ReconciliationInconclusiveException
    */
-  public static function lookupAll(GatewayClient $client, string $orderId, ?int $sentAt, ?string $amount, array $types = GatewayClient::TYPES_CHARGE): array {
-    try {
-      return $client->findTransactionsByOrderId($orderId, $sentAt, 5, $amount, $types);
+  public static function inspect(GatewayClient $client, array $marker): array {
+    if (($marker['kind'] ?? '') === self::REFUND) {
+      return self::earlierRefund($client, $marker);
     }
-    catch (ReconciliationInconclusiveException $e) {
-      throw $e;
+    if (empty($marker['key'])) {
+      throw new ReconciliationInconclusiveException('The marker has no key.');
     }
-    catch (\Throwable $e) {
-      throw new ReconciliationInconclusiveException('The lookup for ' . $orderId . ' failed: ' . $e->getMessage(), 0, [], $e);
+    $found = self::lookup($client, (string) $marker['key'], ((int) ($marker['sent_at'] ?? 0)) ?: NULL, isset($marker['amount']) && $marker['amount'] !== '' ? (string) $marker['amount'] : NULL);
+    if ($found && in_array(Charge::outcome($found), [Charge::APPROVED, Charge::REVERSED], TRUE)) {
+      return ['state' => 'done', 'response' => $found];
     }
+    return ['state' => 'absent'];
   }
 
   /**
