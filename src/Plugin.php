@@ -11,7 +11,7 @@ use Payarc\DonorMessage;
  */
 final class Plugin {
 
-  public const VERSION = '0.1.1';
+  public const VERSION = '0.1.2';
 
   public const SLUG = 'payarc-payments';
 

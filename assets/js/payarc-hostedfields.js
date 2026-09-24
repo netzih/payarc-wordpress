@@ -32,17 +32,18 @@
 
   // Sent into every iframe. PayArc's own defaults float the input at 55%
   // width beside a 25% label column; this makes the input fill its frame.
+  // The inputs are borderless: the page draws one box around all four
+  // fields, with dividers (payarc-payments.css), like a single card input.
   var DEFAULT_CSS = [
     'html, body, .payarc-body { margin: 0; padding: 0; background: transparent; overflow: hidden; }',
     '.payarc-all { box-sizing: border-box; }',
     '.payarc-label, .payarc-label-container { display: none; }',
     '.payarc-container, .payarc-row, .payarc-container-input, .payarc-input-container { float: none; width: 100%; margin: 0; padding: 0; background: transparent; }',
     '.payarc-row:after { content: none; }',
-    '.payarc-input { display: block; width: 100%; height: 44px; margin: 0; padding: 0 12px; font-size: 16px; color: #2c3338;',
-    '  border: 1px solid #8c8f94; border-radius: 4px; background: #fff; box-sizing: border-box; }',
-    '.payarc-input:hover { background: #fff; }',
-    '.payarc-input:focus { outline: none; border-color: #2271b1; box-shadow: 0 0 0 1px #2271b1; }',
-    '.payarc-input-error { border-color: #b32d2e; color: #b32d2e; }',
+    '.payarc-input, .payarc-input:hover, .payarc-input:focus { display: block; width: 100%; height: 42px; margin: 0; padding: 0 12px; font-size: 16px; color: #2c3338;',
+    '  border: 0; border-radius: 0; box-shadow: none; outline: none; background: transparent; box-sizing: border-box; }',
+    '.payarc-input::placeholder { color: #8c8f94; }',
+    '.payarc-input-error { color: #b32d2e; }',
     '.payarc-input-success, .payarc-input-default { color: #2c3338; }'
   ].join('\n');
 
@@ -144,9 +145,37 @@
     if (!style) {
       style = document.createElement('style');
       style.id = 'payarc-styles';
+      // The CSS is for inside PayArc's iframes, which read this element's
+      // text. Applied to this page too, its "html, body { overflow: hidden }"
+      // stops the page from scrolling, so the page ignores it.
+      style.media = 'not all';
       document.head.appendChild(style);
     }
     style.textContent = DEFAULT_CSS + (css ? '\n' + css : '');
+  }
+
+  /**
+   * Browsers do not match :focus-within on the fields box while focus is
+   * inside one of PayArc's cross-origin iframes, so the box gets the class
+   * payarc-focused instead. Moving between two iframes fires nothing in
+   * this page, so while the page itself has no focus this checks a few
+   * times a second.
+   */
+  function trackFocus(box) {
+    var timer = null;
+    function update() {
+      var active = document.activeElement;
+      var inside = !!active && active.tagName === 'IFRAME' && box.contains(active);
+      box.classList.toggle('payarc-focused', inside);
+      if (!document.body.contains(box) || (document.hasFocus() && !inside)) {
+        window.clearInterval(timer);
+        timer = null;
+      } else if (!timer) {
+        timer = window.setInterval(update, 150);
+      }
+    }
+    window.addEventListener('blur', function () { window.setTimeout(update, 0); });
+    window.addEventListener('focus', update);
   }
 
   function settle(result, error) {
@@ -264,6 +293,7 @@
       FIELDS.forEach(function (field) {
         observer.observe(document.getElementById(ids[field.key]), { attributes: true, attributeFilter: ['data-validation'] });
       });
+      trackFocus(fields);
 
       window.initPayarcTokenizer(options.clientId, {
         FORM_STATUS: status.id,

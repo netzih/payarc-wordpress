@@ -2,7 +2,7 @@
 /**
  * Plugin Name: PayArc Payments
  * Description: Take card payments through PayArc in Gravity Forms, GiveWP and WooCommerce. Card details are entered in PayArc's Hosted Fields and never touch this site.
- * Version: 0.1.1
+ * Version: 0.1.2
  * Requires at least: 6.4
  * Requires PHP: 8.1
  * Author: Chabad of Richmond

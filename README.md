@@ -122,6 +122,23 @@ Markers are stored in:
 **Settings > PayArc > Unresolved requests** lists every open marker with a
 "Check at PayArc" action.
 
+## Card form
+
+The four PayArc fields (card number, MM/YY, CVV, ZIP) are drawn as one box
+with thin dividers, like a single card input, in every module; on a phone
+they stack into two rows. The box gets a focus ring while any field has
+focus, and turns red when a field is invalid. The border lives in
+`assets/css/payarc-payments.css`, and the borderless inputs inside the
+iframes in `DEFAULT_CSS` in `assets/js/payarc-hostedfields.js`. Browsers do
+not match `:focus-within` while focus is inside a cross-origin iframe, so the
+script sets `payarc-focused` on the box instead.
+
+The CSS for inside the iframes sits in a `<style id="payarc-styles">` that
+PayArc's script reads. It is marked `media="not all"` so the page itself
+ignores it: before 0.1.2 its `html, body { overflow: hidden }` also applied
+to the page, and pages with the card form could not be scrolled with the
+mouse wheel or by touch.
+
 ## Gravity Forms
 
 - Add the **PayArc Card** field (Pricing Fields) and a **PayArc** feed.

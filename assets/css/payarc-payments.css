@@ -16,21 +16,47 @@
   box-sizing: border-box;
   max-width: 520px;
 }
+/* One box, like a single card input: number, MM/YY, CVV and ZIP side by
+   side with thin dividers. The inputs inside the iframes are borderless
+   (DEFAULT_CSS in payarc-hostedfields.js), so this box draws the border.
+   The script sets .payarc-focused while a field has focus: :focus-within
+   does not match while focus is inside a cross-origin iframe. */
 .payarc-fields,
 .ginput_container_payarc_card .payarc-fields {
   display: grid;
-  grid-template-columns: 2fr 1fr 1fr;
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) 76px 60px 76px;
+  box-sizing: border-box;
+  border: 1px solid #8c8f94;
+  border-radius: 4px;
+  background: #fff;
+  overflow: hidden;
+}
+.payarc-fields:focus-within,
+.payarc-fields.payarc-focused,
+.ginput_container_payarc_card .payarc-fields:focus-within,
+.ginput_container_payarc_card .payarc-fields.payarc-focused {
+  border-color: #2271b1;
+  box-shadow: 0 0 0 1px #2271b1;
+}
+.payarc-fields:has(.payarc-field[data-validation="error"]),
+.ginput_container_payarc_card .payarc-fields:has(.payarc-field[data-validation="error"]) {
+  border-color: #b32d2e;
+  box-shadow: none;
 }
 .payarc-field,
 .ginput_container_payarc_card .payarc-field {
   display: block;
-  height: 44px;
+  height: 42px;
   min-width: 0;
   overflow: hidden;
 }
-.payarc-field-number,
-.ginput_container_payarc_card .payarc-field-number { grid-column: 1 / -1; }
+.payarc-field + .payarc-field,
+.ginput_container_payarc_card .payarc-field + .payarc-field { border-left: 1px solid #dcdcde; }
+/* The hidden "initiate" button and status element: theme rules such as
+   button { display: inline-flex } would otherwise outrank the hidden
+   attribute and show an empty button under the fields. */
+.payarc-card-element > [hidden],
+.ginput_container_payarc_card .payarc-card-element > [hidden] { display: none !important; }
 /* PayArc writes style="all: inherit" on each iframe, which would size it
    from the container's auto width (the 300px iframe default); only an
    !important rule outranks an inline declaration. */
@@ -43,11 +69,16 @@
   padding: 0 !important;
   border: 0 !important;
 }
-@media (max-width: 380px) {
+/* Phones: the number on its own row, the other three below it. */
+@media (max-width: 440px) {
   .payarc-fields,
-  .ginput_container_payarc_card .payarc-fields { grid-template-columns: 1fr 1fr; }
-  .payarc-field-zip,
-  .ginput_container_payarc_card .payarc-field-zip { grid-column: 1 / -1; }
+  .ginput_container_payarc_card .payarc-fields { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .payarc-field-number,
+  .ginput_container_payarc_card .payarc-field-number { grid-column: 1 / -1; }
+  .payarc-field + .payarc-field,
+  .ginput_container_payarc_card .payarc-field + .payarc-field { border-top: 1px solid #dcdcde; }
+  .payarc-field-exp,
+  .ginput_container_payarc_card .payarc-field-exp { border-left: 0; }
 }
 .payarc-card-errors,
 .ginput_container_payarc_card .payarc-card-errors { display: block; max-width: 520px; margin-top: 8px; color: #b32d2e; }
@@ -89,7 +120,7 @@
 .ginput_container_payarc_card .payarc-wallet-divider span { display: inline; padding: 0 10px; }
 
 /* Form editor preview of the hosted fields */
-.payarc-card-element--preview { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 8px; color: #757575; font-size: 15px; }
-.payarc-card-element--preview span { display: block; padding: 10px; border: 1px solid #c3c4c7; border-radius: 4px; }
-.payarc-card-element--preview span:first-child { grid-column: 1 / -1; }
+.payarc-card-element--preview { display: grid; grid-template-columns: minmax(0, 1fr) 76px 60px 76px; border: 1px solid #c3c4c7; border-radius: 4px; color: #757575; font-size: 15px; }
+.payarc-card-element--preview span { display: block; padding: 10px 12px; }
+.payarc-card-element--preview span + span { border-left: 1px solid #dcdcde; }
 .payarc-card-note--warning { color: #b32d2e; opacity: 1; font-weight: 600; }
