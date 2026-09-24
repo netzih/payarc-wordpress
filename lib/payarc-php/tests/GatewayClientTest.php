@@ -398,6 +398,17 @@ final class GatewayClientTest extends TestCase {
     $this->client()->findChargeByReference('r-1', $now - 60);
   }
 
+  public function testVerifyClientIdAsksThePortalForAnIframe(): void {
+    $this->queue(200, ['payarc-check' => '<iframe>']);
+    $this->client()->verifyClientId('abc123', GatewayClient::SANDBOX_PORTAL);
+    self::assertStringStartsWith('https://testportal.payarc.net/v1/get-iframe?user=abc123&', $this->requests[0]['url']);
+    self::assertNull($this->header($this->requests[0], 'Authorization'));
+
+    $this->queue(403, '<html>');
+    $this->expectException(GatewayException::class);
+    $this->client()->verifyClientId('wrong', GatewayClient::SANDBOX_PORTAL);
+  }
+
   public function testDeleteCardDeletesItsCustomer(): void {
     $this->queue(204, '');
 
