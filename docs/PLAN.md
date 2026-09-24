@@ -30,7 +30,8 @@ integrations (`usaepayjs` for CiviCRM and `usaepay-wordpress`).
 
 1. **This library.** Done: client, response readers, donor wording, unit
    tests, credential check and sandbox probes.
-2. **`payarc-wordpress`.**
+2. **`payarc-wordpress`.** Done 2026-09-24: all three modules pass their
+   sandbox runs end to end; see that repo's README, "Tested".
    - Fork and rename.
    - Settings: Client ID and bearer token for live and sandbox, plus extra
      accounts.
@@ -139,3 +140,23 @@ installment. No $1 authorization is needed at signup.
 Still open: Q3 (how long idempotency keys last), the status of a settled
 charge (settle-watch), Q9/Q10 (whether any PayArc email or text actually
 reaches the payer), and Q12 (wallets on a real domain).
+
+### 2026-09-24: WordPress plugin runs
+
+- A refund description shorter than 5 characters is refused ("The
+  description field must be at least 5 characters."). The library now
+  prefixes short ones.
+- Hosted Fields refuse a wrong CVV at tokenization with HTTP 409 and a bare
+  JSON list, `["Invalid CVV"]`.
+- After a refusal the payer can correct the field and tokenize again in the
+  same session. Every tokenization returns a new token.
+- PayArc puts `style="all: inherit"` on its iframes, so our sizing needs
+  `!important`. Its default CSS inside the frame floats the input at 55%
+  width.
+- The portal's `/v1/get-iframe?user=<Client ID>` answers 403 for an unknown
+  Client ID. `verifyClientId()` uses this for "Check credentials".
+- A replayed renewal key returned the earlier charge, with no new charge at
+  PayArc (22 charges before and after).
+
+Next: Phase 3, the `payarcjs` CiviCRM extension. Start from
+[HANDOFF-civicrm.md](HANDOFF-civicrm.md).

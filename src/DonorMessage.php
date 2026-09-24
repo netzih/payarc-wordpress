@@ -142,6 +142,12 @@ class DonorMessage {
 
   private static function categoryFromText(string $gateway, bool $hasCode): string {
     $g = strtolower($gateway);
+    // A used or timed-out card token ("The requested token_id is not valid
+    // or already used", HTTP 404): first, because "expired" would otherwise
+    // read as an expired card and "token" as a configuration fault.
+    if (preg_match('/token_id|token.{0,40}(already used|expired|not valid|invalid)|(invalid|expired|used) token/', $g)) {
+      return 'token';
+    }
     // Order matters: specific reasons before the generic decline.
     if (preg_match('/insufficient|nsf|over.?limit|exceeds.*limit|limit exceeded/', $g)) {
       return 'funds';
@@ -190,6 +196,7 @@ class DonorMessage {
       'expired' => $ts('The card appears to be expired or the expiration date was entered incorrectly. Please check the expiration date and try again.'),
       'cvv' => $ts('The card security code (CVV) did not match. Please check the three or four digit code and try again.'),
       'avs' => $ts('The billing address or postal code did not match the card. Please check the billing address and try again.'),
+      'token' => $ts('The card details expired before the payment was completed, so no charge was made. Please enter your card details again.'),
       'saved' => $ts('The card we have on file for you could not be used. Please update your card details.'),
       'number' => $ts('The card number is not valid or this card type is not accepted. Please check the card number and try again.'),
       'duplicate' => $ts('This looks like a duplicate of a payment made a moment ago, so it was not charged again. Please check your email for a receipt before trying again.'),

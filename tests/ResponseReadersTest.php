@@ -93,6 +93,8 @@ final class ResponseReadersTest extends TestCase {
     self::assertStringContainsString('security code', DonorMessage::fromResponse(['message' => 'Invalid CVV'])['donor']);
     self::assertStringContainsString('not configured correctly', DonorMessage::fromResponse(['error' => 'Unauthenticated.'])['donor']);
     self::assertStringContainsString('did not respond', DonorMessage::fromResponse(['message' => 'server error'])['donor']);
+    // A used token is not a configuration fault (HTTP 404, sandbox 2026-09-24).
+    self::assertStringContainsString('enter your card details again', DonorMessage::fromResponse(['message' => 'The requested token_id is not valid or already used'])['donor']);
     // Laravel's {"code": 0} is not a response code.
     self::assertSame('Return Not Allowed.', DonorMessage::fromResponse(['status' => 'error', 'code' => 0, 'message' => 'Return Not Allowed.'])['gateway']);
   }
