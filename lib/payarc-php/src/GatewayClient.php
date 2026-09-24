@@ -203,7 +203,7 @@ class GatewayClient {
     }
     $payload = ['reason' => $reason];
     if ($description !== NULL && trim($description) !== '') {
-      $payload['void_description'] = $this->truncate($description, 255);
+      $payload['void_description'] = $this->reasonText($description, 'Void');
     }
     return $this->request('POST', '/charges/' . rawurlencode($this->validId($chargeId, 'charge')) . '/void', $payload);
   }
@@ -261,7 +261,7 @@ class GatewayClient {
       $payload['amount'] = $cents;
     }
     if (isset($options['description']) && trim((string) $options['description']) !== '') {
-      $payload['description'] = $this->truncate((string) $options['description'], 255);
+      $payload['description'] = $this->reasonText((string) $options['description'], 'Refund');
     }
     return $this->request('POST', '/charges/' . rawurlencode($chargeId) . '/refunds', $payload, $this->idempotencyKey($options));
   }
@@ -570,6 +570,17 @@ class GatewayClient {
       throw new \InvalidArgumentException(sprintf('Invalid PayArc %s.', $what));
     }
     return $id;
+  }
+
+  /**
+   * PayArc refuses a refund description shorter than five characters ("The
+   * description field must be at least 5 characters.", sandbox 2026-09-24),
+   * so a short one (a shop's "test" or "dup") is prefixed.
+   */
+  private function reasonText(string $text, string $prefix): string {
+    $text = trim($text);
+    $length = function_exists('mb_strlen') ? mb_strlen($text) : strlen($text);
+    return $this->truncate($length < 5 ? $prefix . ': ' . $text : $text, 255);
   }
 
   private function truncate(string $value, int $length): string {

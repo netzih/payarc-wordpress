@@ -247,6 +247,15 @@ final class GatewayClientTest extends TestCase {
     }
   }
 
+  public function testShortRefundDescriptionIsPrefixed(): void {
+    $this->queue(200, ['data' => $this->charge()]);
+    $this->queue(201, ['data' => $this->charge(['status' => 'refunded'])]);
+
+    $this->client()->refund('CH1', NULL, ['description' => 'test']);
+
+    self::assertSame('Refund: test', json_decode($this->requests[1]['body'], TRUE)['description']);
+  }
+
   public function testFullRefundOmitsTheAmountAndReportsAVoid(): void {
     $this->queue(200, ['data' => $this->charge(['status' => 'submitted_for_settlement'])]);
     $this->queue(201, ['data' => $this->charge(['status' => 'void', 'amount_voided' => 1000])]);
