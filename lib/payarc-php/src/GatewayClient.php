@@ -30,11 +30,17 @@ class GatewayClient {
   public const REFERENCE_KEY = 'reference';
 
   /**
-   * The list endpoint shows created_at without a zone. Reading it as UTC can
-   * be off by up to 14 hours either way, so a time cutoff is widened by this
-   * much before it is trusted.
+   * The docs show list rows with created_at as a date without a zone; read
+   * as UTC it can be off by up to 14 hours either way, so a cutoff against
+   * such a row is widened by this much. The sandbox returns a Unix time
+   * instead (2026-09-24), which only needs CLOCK_SLACK.
    */
   public const CREATED_TIME_SLACK = 26 * 3600;
+
+  /**
+   * Allowance for clock differences against an exact (Unix) created_at.
+   */
+  public const CLOCK_SLACK = 15 * 60;
 
   /**
    * Void reasons PayArc accepts.
@@ -321,7 +327,8 @@ class GatewayClient {
    *
    * @param int|null $sentAt
    *   Unix time the charge was sent. Paging stops at the first row created
-   *   before it (minus CREATED_TIME_SLACK): a miss is then conclusive.
+   *   before it (minus CLOCK_SLACK, or CREATED_TIME_SLACK for a row whose
+   *   time has no zone): a miss is then conclusive.
    * @param string|null $amount
    *   When given, only a row for this amount counts.
    *
@@ -340,15 +347,17 @@ class GatewayClient {
     if ($reference === '') {
       throw new \InvalidArgumentException('A charge reference is required.');
     }
-    $cutoff = $sentAt !== NULL ? $sentAt - self::CREATED_TIME_SLACK : NULL;
     $cents = $amount === NULL ? NULL : Amount::toCents($amount);
     $pageSize = 100;
     for ($page = 1; $page <= max(1, $maxPages); $page++) {
       $list = $this->listCharges($pageSize, $page);
       foreach ($list['rows'] as $row) {
         $created = Charge::createdTime($row);
-        if ($cutoff !== NULL && $created !== NULL && $created < $cutoff) {
-          return NULL;
+        if ($sentAt !== NULL && $created !== NULL) {
+          $exact = is_int($row['created_at'] ?? NULL) || ctype_digit((string) ($row['created_at'] ?? ''));
+          if ($created < $sentAt - ($exact ? self::CLOCK_SLACK : self::CREATED_TIME_SLACK)) {
+            return NULL;
+          }
         }
         if (!Charge::hasMetadata($row)) {
           throw new ReconciliationInconclusiveException(sprintf('PayArc lists charge %s without metadata, so it cannot be told whether it is %s.', Charge::id($row) ?: '?', $reference));
