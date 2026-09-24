@@ -1,6 +1,6 @@
 {
   "name": "chabadrichmond/payarc-payments",
-  "description": "PayArc payment gateway for Gravity Forms, GiveWP and WooCommerce (Pay.js tokenization, saved cards, site-managed recurring)",
+  "description": "PayArc payment gateway for Gravity Forms, GiveWP and WooCommerce (Hosted Fields tokenization, saved cards, site-managed recurring)",
   "type": "wordpress-plugin",
   "license": "GPL-2.0-or-later",
   "require": {
