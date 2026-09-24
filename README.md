@@ -30,6 +30,19 @@ saves that token server-side using the secret **bearer token**.
 - `Payarc\CardDetails`: brand (from PayArc's V/M/X/R/J codes), last four,
   expiry and whether the card is verified.
 - `Payarc\CardReference` and `Payarc\Amount`: small value helpers.
+- `Payarc\VelocityGuard`: card-testing limits.
+  - Callers ask `check()` before each payer-initiated charge or card save,
+    and call `recordFailure()` after each decline.
+  - It refuses an IP address after `ip_limit` failures in the window
+    (60 minutes).
+  - It pauses all card payments for `pause_minutes` after `site_limit`
+    failures from any address, and returns `TRIPPED` once so the caller can
+    send an alert.
+  - An optional `min_amount` refuses small charges.
+  - State lives in a `VelocityStore` that the caller supplies (a WordPress
+    transient, a CiviCRM cache). `ArrayVelocityStore` keeps it in memory for
+    tests.
+  - Renewals must bypass the guard.
 
 ## Conventions every caller gets
 

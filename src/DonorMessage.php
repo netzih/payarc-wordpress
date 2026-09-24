@@ -70,6 +70,13 @@ class DonorMessage {
   }
 
   /**
+   * English text through the injected translator (as-is without one).
+   */
+  public static function translate(string $english): string {
+    return self::$translator ? (string) (self::$translator)($english) : $english;
+  }
+
+  /**
    * @param array $response
    *   A declined charge (failure_code/failure_message), or the response data
    *   of a GatewayException ({message, errors}), or ['error' => text] for
