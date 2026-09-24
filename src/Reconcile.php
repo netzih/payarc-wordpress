@@ -329,9 +329,7 @@ final class Reconcile {
    * What a stored marker's request came to, for the admin "Check at PayArc"
    * action. Never sends anything.
    *
-   * @return array{state: 'done'|'absent'|'pending', response?: array}
-   *   'pending': recent enough that the next attempt settles it by replaying
-   *   its key.
+   * @return array{state: 'done'|'absent', response?: array}
    *
    * @throws ReconciliationInconclusiveException
    */

@@ -153,13 +153,20 @@ final class Settings {
   }
 
   /**
+   * The Hosted Fields portal: test or live.
+   */
+  public function portalUrl(?string $mode = NULL): string {
+    return ($mode ?? $this->mode()) === self::MODE_SANDBOX
+      ? \Payarc\GatewayClient::SANDBOX_PORTAL
+      : \Payarc\GatewayClient::LIVE_PORTAL;
+  }
+
+  /**
    * PayArc's Hosted Fields script. It works out its own host (test or live
    * portal) from this URL.
    */
   public function hostedFieldsUrl(?string $mode = NULL): string {
-    return ($mode ?? $this->mode()) === self::MODE_SANDBOX
-      ? 'https://testportal.payarc.net/js/iframeprocess.js'
-      : 'https://portal.payarc.net/js/iframeprocess.js';
+    return $this->portalUrl($mode) . '/js/iframeprocess.js';
   }
 
   public function applePayEnabled(): bool {

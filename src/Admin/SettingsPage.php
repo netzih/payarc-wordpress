@@ -7,8 +7,9 @@ use Payarc\WordPress\Gateway;
 use Payarc\WordPress\Settings;
 
 /**
- * Settings > PayArc: credentials for live and sandbox, mode switch, Apple Pay
- * and a "Check credentials" action that proves the keys work without charging.
+ * Settings > PayArc: credentials for live and sandbox, mode switch, wallets
+ * and a "Check credentials" action that proves the credentials work without
+ * charging.
  */
 final class SettingsPage {
 
@@ -68,7 +69,7 @@ final class SettingsPage {
     ?>
     <div class="wrap">
       <h1><?php esc_html_e('PayArc Payments', 'payarc-payments'); ?></h1>
-      <p><?php esc_html_e('The default PayArc account serves every form and checkout on this site; plugins that support it (Embed Forms) can charge chosen forms to one of the additional accounts below. Card details are entered in fields hosted by PayArc (Pay.js); this site only ever handles single-use payment keys and saved-card references.', 'payarc-payments'); ?></p>
+      <p><?php esc_html_e('The default PayArc account serves every form and checkout on this site; plugins that support it (Embed Forms) can charge chosen forms to one of the additional accounts below. Card details are entered in fields hosted by PayArc (Hosted Fields); this site only ever handles single-use card tokens and saved-card references.', 'payarc-payments'); ?></p>
 
       <form method="post" action="options.php">
         <?php settings_fields('payarc_payments'); ?>
@@ -77,8 +78,8 @@ final class SettingsPage {
             <th scope="row"><?php esc_html_e('Mode', 'payarc-payments'); ?></th>
             <td>
               <fieldset>
-                <label><input type="radio" name="<?php echo esc_attr(Settings::OPTION); ?>[mode]" value="sandbox" <?php checked($v['mode'], 'sandbox'); ?>> <?php esc_html_e('Sandbox (test) — sandbox.payarc.com, no real money', 'payarc-payments'); ?></label><br>
-                <label><input type="radio" name="<?php echo esc_attr(Settings::OPTION); ?>[mode]" value="live" <?php checked($v['mode'], 'live'); ?>> <?php esc_html_e('Live — secure.payarc.com', 'payarc-payments'); ?></label>
+                <label><input type="radio" name="<?php echo esc_attr(Settings::OPTION); ?>[mode]" value="sandbox" <?php checked($v['mode'], 'sandbox'); ?>> <?php esc_html_e('Sandbox (test) — testapi.payarc.net, no real money', 'payarc-payments'); ?></label><br>
+                <label><input type="radio" name="<?php echo esc_attr(Settings::OPTION); ?>[mode]" value="live" <?php checked($v['mode'], 'live'); ?>> <?php esc_html_e('Live — api.payarc.net', 'payarc-payments'); ?></label>
               </fieldset>
             </td>
           </tr>
@@ -89,29 +90,25 @@ final class SettingsPage {
           <p class="description">
             <?php
             echo $mode === 'live'
-              ? esc_html__('From the PayArc merchant console: Settings > Source Keys. The key needs Sale, Auth Only, Void and Credit (refund) allowed. The Pay.js public key comes from Settings > Payment Forms / Pay.js.', 'payarc-payments')
-              : esc_html__('From sandbox.payarc.com. Test card 4000100011112224 approves and 4000300011112220 declines.', 'payarc-payments');
+              ? esc_html__('From the PayArc dashboard (dashboard.payarc.net): API, then the eye icon, which shows the Client ID and the API bearer token.', 'payarc-payments')
+              : esc_html__('From the PayArc test dashboard (testdashboard.payarc.net), same place. Test card 4012 0000 9876 5439, expiry 12/29, CVV 999, ZIP 85284.', 'payarc-payments');
             ?>
           </p>
           <table class="form-table" role="presentation">
             <tr>
-              <th scope="row"><label for="payarc-<?php echo esc_attr($mode); ?>-api-key"><?php esc_html_e('API key (source key)', 'payarc-payments'); ?></label></th>
-              <td><input id="payarc-<?php echo esc_attr($mode); ?>-api-key" class="regular-text code" type="text" autocomplete="off" name="<?php echo esc_attr(Settings::OPTION); ?>[<?php echo esc_attr($mode); ?>_api_key]" value="<?php echo esc_attr($v[$mode . '_api_key']); ?>"></td>
-            </tr>
-            <tr>
-              <th scope="row"><label for="payarc-<?php echo esc_attr($mode); ?>-api-pin"><?php esc_html_e('API PIN', 'payarc-payments'); ?></label></th>
+              <th scope="row"><label for="payarc-<?php echo esc_attr($mode); ?>-bearer-token"><?php esc_html_e('API bearer token', 'payarc-payments'); ?></label></th>
               <td>
-                <input id="payarc-<?php echo esc_attr($mode); ?>-api-pin" class="regular-text code" type="password" autocomplete="new-password" name="<?php echo esc_attr(Settings::OPTION); ?>[<?php echo esc_attr($mode); ?>_api_pin]" value="" placeholder="<?php echo $v[$mode . '_api_pin'] !== '' ? esc_attr__('(saved — leave blank to keep)', 'payarc-payments') : ''; ?>">
-                <?php if ($v[$mode . '_api_pin'] !== ''): ?>
-                  <label style="margin-left:8px"><input type="checkbox" name="<?php echo esc_attr(Settings::OPTION); ?>[<?php echo esc_attr($mode); ?>_clear_pin]" value="1"> <?php esc_html_e('Clear saved PIN', 'payarc-payments'); ?></label>
+                <input id="payarc-<?php echo esc_attr($mode); ?>-bearer-token" class="large-text code" type="password" autocomplete="new-password" name="<?php echo esc_attr(Settings::OPTION); ?>[<?php echo esc_attr($mode); ?>_bearer_token]" value="" placeholder="<?php echo $v[$mode . '_bearer_token'] !== '' ? esc_attr__('(saved — leave blank to keep)', 'payarc-payments') : ''; ?>">
+                <?php if ($v[$mode . '_bearer_token'] !== ''): ?>
+                  <label><input type="checkbox" name="<?php echo esc_attr(Settings::OPTION); ?>[<?php echo esc_attr($mode); ?>_clear_token]" value="1"> <?php esc_html_e('Clear saved token', 'payarc-payments'); ?></label>
                 <?php endif; ?>
-                <p class="description"><?php esc_html_e('Set on the source key in the console. Requests are signed with it; it is never sent in clear.', 'payarc-payments'); ?></p>
+                <p class="description"><?php esc_html_e('Secret: it can charge and refund. It is used only on this server and never sent to browsers.', 'payarc-payments'); ?></p>
               </td>
             </tr>
             <tr>
-              <th scope="row"><label for="payarc-<?php echo esc_attr($mode); ?>-public-key"><?php esc_html_e('Pay.js public key', 'payarc-payments'); ?></label></th>
-              <td><input id="payarc-<?php echo esc_attr($mode); ?>-public-key" class="regular-text code" type="text" autocomplete="off" name="<?php echo esc_attr(Settings::OPTION); ?>[<?php echo esc_attr($mode); ?>_public_key]" value="<?php echo esc_attr($v[$mode . '_public_key']); ?>">
-                <p class="description"><?php esc_html_e('Used in the browser to create the hosted card fields. Safe to expose; it can only mint single-use payment keys.', 'payarc-payments'); ?></p></td>
+              <th scope="row"><label for="payarc-<?php echo esc_attr($mode); ?>-client-id"><?php esc_html_e('Client ID', 'payarc-payments'); ?></label></th>
+              <td><input id="payarc-<?php echo esc_attr($mode); ?>-client-id" class="regular-text code" type="text" autocomplete="off" name="<?php echo esc_attr(Settings::OPTION); ?>[<?php echo esc_attr($mode); ?>_client_id]" value="<?php echo esc_attr($v[$mode . '_client_id']); ?>">
+                <p class="description"><?php esc_html_e('Used in the browser to show the hosted card fields. Safe to expose; it can only create single-use card tokens.', 'payarc-payments'); ?></p></td>
             </tr>
           </table>
         <?php endforeach; ?>
@@ -121,12 +118,11 @@ final class SettingsPage {
         <h2><?php esc_html_e('Options', 'payarc-payments'); ?></h2>
         <table class="form-table" role="presentation">
           <tr>
-            <th scope="row"><?php esc_html_e('Apple Pay', 'payarc-payments'); ?></th>
+            <th scope="row"><?php esc_html_e('Wallets', 'payarc-payments'); ?></th>
             <td>
-              <label><input type="checkbox" name="<?php echo esc_attr(Settings::OPTION); ?>[apple_pay]" value="1" <?php checked(!empty($v['apple_pay'])); ?>> <?php esc_html_e('Offer Apple Pay for one-time payments where the browser supports it', 'payarc-payments'); ?></label>
-              <p class="description"><?php esc_html_e('Requires Apple Pay enabled on the PayArc account, this domain registered under Settings > Apple Pay, and Apple\'s domain-association file served from /.well-known/. Not available for recurring payments (the key is single-use).', 'payarc-payments'); ?></p>
-              <p><label for="payarc-apple-pay-name"><?php esc_html_e('Name shown on the Apple Pay sheet', 'payarc-payments'); ?></label><br>
-              <input id="payarc-apple-pay-name" class="regular-text" type="text" name="<?php echo esc_attr(Settings::OPTION); ?>[apple_pay_display_name]" value="<?php echo esc_attr($v['apple_pay_display_name']); ?>" placeholder="<?php echo esc_attr(get_bloginfo('name')); ?>"></p>
+              <label><input type="checkbox" name="<?php echo esc_attr(Settings::OPTION); ?>[apple_pay]" value="1" <?php checked(!empty($v['apple_pay'])); ?>> <?php esc_html_e('Offer Apple Pay for one-time payments (Safari with a card in Apple Wallet)', 'payarc-payments'); ?></label><br>
+              <label><input type="checkbox" name="<?php echo esc_attr(Settings::OPTION); ?>[google_pay]" value="1" <?php checked(!empty($v['google_pay'])); ?>> <?php esc_html_e('Offer Google Pay for one-time payments', 'payarc-payments'); ?></label>
+              <p class="description"><?php esc_html_e('The wallet sheet opens in a small PayArc window, so no Apple merchant setup or domain file is needed on this site. The wallets must be enabled on the PayArc account. Not offered for recurring payments or saving a card: wallet tokens cannot be charged again.', 'payarc-payments'); ?></p>
             </td>
           </tr>
           <tr>
@@ -138,7 +134,7 @@ final class SettingsPage {
         <p class="submit">
           <?php submit_button(NULL, 'primary', 'submit', FALSE); ?>
           <a class="button" href="<?php echo esc_url($checkUrl); ?>" style="margin-left:8px"><?php esc_html_e('Check credentials', 'payarc-payments'); ?></a>
-          <span class="description" style="margin-left:8px"><?php esc_html_e('Save first. The check lists one transaction and mints an unused payment key; nothing is charged.', 'payarc-payments'); ?></span>
+          <span class="description" style="margin-left:8px"><?php esc_html_e('Save first. The check lists one charge with the bearer token and opens an unused card-field session with the Client ID; nothing is charged.', 'payarc-payments'); ?></span>
         </p>
       </form>
       <?php $this->renderUnresolved(); ?>
@@ -171,22 +167,21 @@ final class SettingsPage {
               <code style="margin-left:8px"><?php echo esc_html($account['id']); ?></code>
               <label style="margin-left:12px"><input type="checkbox" name="<?php echo $field('remove'); ?>" value="1"> <?php esc_html_e('Remove this account', 'payarc-payments'); ?></label>
             <?php else : ?>
-              <p class="description"><?php esc_html_e('Fill in a name and the keys, then save. Leave blank to add nothing.', 'payarc-payments'); ?></p>
+              <p class="description"><?php esc_html_e('Fill in a name and the credentials, then save. Leave blank to add nothing.', 'payarc-payments'); ?></p>
             <?php endif; ?>
           </td>
         </tr>
         <?php foreach (['live' => __('Live', 'payarc-payments'), 'sandbox' => __('Sandbox', 'payarc-payments')] as $mode => $modeLabel) :
-          $pin = (string) ($account[$mode . '_api_pin'] ?? '');
+          $bearer = (string) ($account[$mode . '_bearer_token'] ?? '');
           ?>
           <tr>
             <th scope="row"><?php echo esc_html($modeLabel); ?></th>
             <td>
-              <p><label><?php esc_html_e('API key (source key)', 'payarc-payments'); ?><br><input class="regular-text code" type="text" autocomplete="off" name="<?php echo $field($mode . '_api_key'); ?>" value="<?php echo esc_attr($account[$mode . '_api_key'] ?? ''); ?>"></label></p>
-              <p><label><?php esc_html_e('API PIN', 'payarc-payments'); ?><br><input class="regular-text code" type="password" autocomplete="new-password" name="<?php echo $field($mode . '_api_pin'); ?>" value="" placeholder="<?php echo $pin !== '' ? esc_attr__('(saved — leave blank to keep)', 'payarc-payments') : ''; ?>"></label>
-                <?php if ($pin !== '') : ?>
-                  <label style="margin-left:8px"><input type="checkbox" name="<?php echo $field($mode . '_clear_pin'); ?>" value="1"> <?php esc_html_e('Clear saved PIN', 'payarc-payments'); ?></label>
+              <p><label><?php esc_html_e('API bearer token', 'payarc-payments'); ?><br><input class="large-text code" type="password" autocomplete="new-password" name="<?php echo $field($mode . '_bearer_token'); ?>" value="" placeholder="<?php echo $bearer !== '' ? esc_attr__('(saved — leave blank to keep)', 'payarc-payments') : ''; ?>"></label>
+                <?php if ($bearer !== '') : ?>
+                  <label><input type="checkbox" name="<?php echo $field($mode . '_clear_token'); ?>" value="1"> <?php esc_html_e('Clear saved token', 'payarc-payments'); ?></label>
                 <?php endif; ?></p>
-              <p><label><?php esc_html_e('Pay.js public key', 'payarc-payments'); ?><br><input class="regular-text code" type="text" autocomplete="off" name="<?php echo $field($mode . '_public_key'); ?>" value="<?php echo esc_attr($account[$mode . '_public_key'] ?? ''); ?>"></label></p>
+              <p><label><?php esc_html_e('Client ID', 'payarc-payments'); ?><br><input class="regular-text code" type="text" autocomplete="off" name="<?php echo $field($mode . '_client_id'); ?>" value="<?php echo esc_attr($account[$mode . '_client_id'] ?? ''); ?>"></label></p>
             </td>
           </tr>
         <?php endforeach; ?>
@@ -211,7 +206,7 @@ final class SettingsPage {
           <tr>
             <th><?php esc_html_e('Record', 'payarc-payments'); ?></th>
             <th><?php esc_html_e('Request', 'payarc-payments'); ?></th>
-            <th><?php esc_html_e('orderid at PayArc', 'payarc-payments'); ?></th>
+            <th><?php esc_html_e('Reference at PayArc', 'payarc-payments'); ?></th>
             <th><?php esc_html_e('Sent', 'payarc-payments'); ?></th>
             <th><?php esc_html_e('Amount', 'payarc-payments'); ?></th>
             <th><?php esc_html_e('Mode', 'payarc-payments'); ?></th>
@@ -225,7 +220,7 @@ final class SettingsPage {
             <tr>
               <td><a href="<?php echo esc_url($item['url']); ?>"><?php echo esc_html($item['module'] . ': ' . $item['record']); ?></a></td>
               <td><?php echo esc_html($item['kind'] === 'refund' ? __('Refund', 'payarc-payments') : __('Charge', 'payarc-payments')); ?></td>
-              <td><code><?php echo esc_html($item['orderid']); ?></code></td>
+              <td><code><?php echo esc_html($item['reference']); ?></code></td>
               <td><?php echo $item['sent_at'] > 0 ? esc_html(wp_date(get_option('date_format') . ' ' . get_option('time_format'), $item['sent_at'])) : '&mdash;'; ?></td>
               <td><?php echo $item['amount'] !== NULL ? esc_html($item['amount']) : '&mdash;'; ?></td>
               <td><?php echo esc_html($item['mode']); ?></td>
@@ -355,30 +350,29 @@ final class SettingsPage {
     $messages = [];
     $ok = TRUE;
     if (!$this->settings->hasApiCredentials($mode, $account)) {
-      return ['ok' => FALSE, 'messages' => [sprintf(__('%s credentials are incomplete: the API key and PIN are both required.', 'payarc-payments'), $label)]];
+      return ['ok' => FALSE, 'messages' => [sprintf(__('%s credentials are incomplete: the API bearer token is required.', 'payarc-payments'), $label)]];
     }
     $client = $this->gateway->client('settings check', $mode, $account);
     try {
       $list = $client->verifyCredentials();
-      $rows = is_array($list['data'] ?? NULL) ? count($list['data']) : 0;
-      $messages[] = $rows > 0
-        ? sprintf(__('%s API key and PIN work (the account has transactions).', 'payarc-payments'), $label)
-        : sprintf(__('%s API key and PIN work (no transactions on the account yet).', 'payarc-payments'), $label);
+      $messages[] = !empty($list['rows'])
+        ? sprintf(__('%s API bearer token works (the account has charges).', 'payarc-payments'), $label)
+        : sprintf(__('%s API bearer token works (no charges on the account yet).', 'payarc-payments'), $label);
     }
     catch (GatewayException $e) {
       $ok = FALSE;
-      $messages[] = sprintf(__('%1$s API key or PIN rejected: %2$s', 'payarc-payments'), $label, $e->getMessage());
+      $messages[] = sprintf(__('%1$s API bearer token rejected: %2$s', 'payarc-payments'), $label, $e->getMessage());
     }
     try {
-      if ($this->settings->publicKey($mode, $account) === '') {
+      if ($this->settings->clientId($mode, $account) === '') {
         throw new GatewayException(__('none entered; the checkout card fields need it.', 'payarc-payments'));
       }
-      $client->verifyPublicKey($this->settings->publicKey($mode, $account));
-      $messages[] = sprintf(__('%s Pay.js public key accepted.', 'payarc-payments'), $label);
+      $client->verifyClientId($this->settings->clientId($mode, $account), $this->settings->portalUrl($mode));
+      $messages[] = sprintf(__('%s Client ID accepted.', 'payarc-payments'), $label);
     }
-    catch (GatewayException $e) {
+    catch (GatewayException | \InvalidArgumentException $e) {
       $ok = FALSE;
-      $messages[] = sprintf(__('%1$s Pay.js public key rejected: %2$s', 'payarc-payments'), $label, $e->getMessage());
+      $messages[] = sprintf(__('%1$s Client ID rejected: %2$s', 'payarc-payments'), $label, $e->getMessage());
     }
     return ['ok' => $ok, 'messages' => $messages];
   }

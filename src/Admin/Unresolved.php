@@ -2,7 +2,7 @@
 
 namespace Payarc\WordPress\Admin;
 
-use Payarc\GatewayClient;
+use Payarc\Charge;
 use Payarc\GatewayException;
 use Payarc\ReconciliationInconclusiveException;
 use Payarc\WordPress\Gateway;
@@ -33,7 +33,7 @@ final class Unresolved {
   }
 
   /**
-   * @return array<int, array{key: string, module: string, record: string, url: string, kind: string, orderid: string, sent_at: int, amount: ?string, types: string[], exclude: string[], mode: string, account: string, hint: string}>
+   * @return array<int, array{key: string, module: string, record: string, url: string, kind: string, orderid: string, reference: string, sent_at: int, amount: ?string, marker: array, mode: string, account: string, hint: string}>
    */
   public function items(): array {
     $plugin = \Payarc\WordPress\Plugin::instance();
@@ -63,26 +63,36 @@ final class Unresolved {
    * @return array{ok: bool, message: string}
    */
   public function check(array $item): array {
+    $marker = ($item['marker'] ?? []) + [
+      'key' => $item['reference'],
+      'sent_at' => $item['sent_at'],
+      'amount' => $item['amount'],
+      'kind' => $item['kind'] === 'refund' ? Reconcile::REFUND : Reconcile::CHARGE,
+    ];
+    if ($item['kind'] === 'refund' && empty($marker['charge_id'])) {
+      return ['ok' => FALSE, 'message' => sprintf(__('%1$s: this refund record does not say which charge it was for. Check the charge in the PayArc dashboard before refunding again.', 'payarc-payments'), $item['record'])];
+    }
     try {
       $client = $this->gateway->client('admin check', $item['mode'], $item['account'] ?? NULL);
-      $found = Reconcile::lookup($client, $item['orderid'], $item['sent_at'] ?: NULL, $item['amount'], $item['types'], $item['exclude']);
+      $state = Reconcile::inspect($client, $marker);
     }
     catch (ReconciliationInconclusiveException $e) {
-      return ['ok' => FALSE, 'message' => sprintf(__('%1$s: PayArc could not say whether %2$s went through (%3$s). Search the PayArc console for orderid %2$s before retrying.', 'payarc-payments'), $item['record'], $item['orderid'], $e->getMessage())];
+      return ['ok' => FALSE, 'message' => sprintf(__('%1$s: PayArc could not say whether %2$s went through (%3$s). Look for a charge with reference %2$s in the PayArc dashboard before retrying.', 'payarc-payments'), $item['record'], $item['reference'], $e->getMessage())];
     }
     catch (GatewayException $e) {
       return ['ok' => FALSE, 'message' => sprintf(__('%1$s: the check failed: %2$s', 'payarc-payments'), $item['record'], $e->getMessage())];
     }
-    $what = $item['kind'] === 'refund' ? __('refund', 'payarc-payments') : __('charge', 'payarc-payments');
-    if ($found === NULL) {
-      return ['ok' => TRUE, 'message' => sprintf(__('%1$s: PayArc has no %2$s with orderid %3$s newer than the request, so it never went through. Trying again is safe; the marker is cleared by that attempt.', 'payarc-payments'), $item['record'], $what, $item['orderid'])];
+    if ($item['kind'] === 'refund') {
+      if ($state['state'] !== 'done') {
+        return ['ok' => TRUE, 'message' => sprintf(__('%1$s: charge %2$s shows no refund since the request, so it never went through. Trying again is safe; the marker is cleared by that attempt.', 'payarc-payments'), $item['record'], (string) $marker['charge_id'])];
+      }
+      return ['ok' => TRUE, 'message' => sprintf(__('%1$s: the refund WENT THROUGH at PayArc: charge %2$s now shows %3$s refunded (status %4$s). %5$s', 'payarc-payments'), $item['record'], (string) $marker['charge_id'], \Payarc\Amount::fromCents((int) ($state['response']['amount_refunded'] ?? 0)), (string) ($state['response']['status'] ?? ''), $item['hint'])];
     }
-    $key = Gateway::transactionReference($found);
-    $amount = (string) ($found['amount'] ?? '');
-    if (!Gateway::approved($found)) {
-      return ['ok' => TRUE, 'message' => sprintf(__('%1$s: the %2$s with orderid %3$s was declined at PayArc (transaction %4$s). Nothing was taken; trying again is safe.', 'payarc-payments'), $item['record'], $what, $item['orderid'], $key)];
+    if ($state['state'] !== 'done') {
+      return ['ok' => TRUE, 'message' => sprintf(__('%1$s: PayArc has no approved charge with reference %2$s since the request, so it never went through. Trying again is safe; the marker is cleared by that attempt.', 'payarc-payments'), $item['record'], $item['reference'])];
     }
-    return ['ok' => TRUE, 'message' => sprintf(__('%1$s: the %2$s with orderid %3$s WENT THROUGH at PayArc: transaction %4$s for %5$s. %6$s', 'payarc-payments'), $item['record'], $what, $item['orderid'], $key, $amount, $item['hint'])];
+    $found = $state['response'];
+    return ['ok' => TRUE, 'message' => sprintf(__('%1$s: the charge with reference %2$s WENT THROUGH at PayArc: charge %3$s for %4$s. %5$s', 'payarc-payments'), $item['record'], $item['reference'], Gateway::transactionReference($found), \Payarc\Amount::fromCents(Charge::amountCents($found)), $item['hint'])];
   }
 
   /**
@@ -99,7 +109,7 @@ final class Unresolved {
       $marker = $order->get_meta('_payarc_charge_sent');
       if (is_array($marker) && !empty($marker['orderid'])) {
         $items[] = $this->item('WooCommerce', sprintf(__('Order #%s', 'payarc-payments'), $order->get_order_number()), $order->get_edit_order_url(), 'charge', $marker, $mode($order),
-          __('The order completes without a second charge when the customer submits the checkout again. To finish it by hand, mark it paid and put the transaction key in the order notes.', 'payarc-payments'));
+          __('The order completes without a second charge when the customer submits the checkout again. To finish it by hand, mark it paid and put the PayArc charge id in the order notes.', 'payarc-payments'));
       }
     }
     foreach ($this->orders('_payarc_refund_sent', []) as $order) {
@@ -115,7 +125,7 @@ final class Unresolved {
         if (is_array($attempt) && !empty($attempt['orderid'])) {
           $attempt['amount'] = $attempt['amount'] ?? number_format((float) $order->get_total(), 2, '.', '');
           $items[] = $this->item('WooCommerce', sprintf(__('Renewal order #%s', 'payarc-payments'), $order->get_order_number()), $order->get_edit_order_url(), 'charge', $attempt, $mode($order),
-            __('WooCommerce Subscriptions retries the renewal on its own schedule; the retry records this transaction instead of charging again. Or process the renewal from the subscription screen now.', 'payarc-payments'));
+            __('WooCommerce Subscriptions retries the renewal on its own schedule; the retry records this charge instead of charging again. Or process the renewal from the subscription screen now.', 'payarc-payments'));
         }
       }
     }
@@ -157,7 +167,7 @@ final class Unresolved {
       if ($row['meta_key'] === 'payarc_reconcile_order_id') {
         $marker = ['orderid' => (string) $row['meta_value'], 'sent_at' => (int) gform_get_meta($entryId, 'payarc_reconcile_sent_at'), 'amount' => number_format((float) rgar($entry, 'payment_amount'), 2, '.', '')];
         $items[] = $this->item('Gravity Forms', $record, $url, 'charge', $marker, $mode,
-          __('The hourly renewal worker records this transaction on its next run without charging again; "Run renewal workers now" below does it immediately.', 'payarc-payments'));
+          __('The hourly renewal worker records this charge on its next run without charging again; "Run renewal workers now" below does it immediately.', 'payarc-payments'));
       }
       else {
         $marker = maybe_unserialize((string) $row['meta_value']);
@@ -197,7 +207,7 @@ final class Unresolved {
         $url = admin_url('edit.php?post_type=give_forms&page=give-payment-history&view=view-payment-details&id=' . $donationId);
         $items[] = $this->item('GiveWP', sprintf(__('Donation #%d', 'payarc-payments'), $donationId), $url, $isRefund ? 'refund' : 'charge', $marker, $mode, $isRefund
           ? __('Refund the donation again from its screen: it is recorded without refunding twice.', 'payarc-payments')
-          : __('The donation completes without a second charge when the donor submits the form again. To finish it by hand, mark it complete and note the transaction key.', 'payarc-payments'));
+          : __('The donation completes without a second charge when the donor submits the form again. To finish it by hand, mark it complete and note the PayArc charge id.', 'payarc-payments'));
       }
     }
     $state = get_option('payarc_give_renewal_state', []);
@@ -213,7 +223,7 @@ final class Unresolved {
         }
         $url = admin_url('edit.php?post_type=give_forms&page=give-subscriptions&id=' . (int) $subscriptionId);
         $items[] = $this->item('GiveWP', sprintf(__('Subscription #%d', 'payarc-payments'), (int) $subscriptionId), $url, 'charge', $marker, $this->settings->mode(),
-          __('The hourly renewal worker records this transaction on its next run without charging again; "Run renewal workers now" below does it immediately.', 'payarc-payments'));
+          __('The hourly renewal worker records this charge on its next run without charging again; "Run renewal workers now" below does it immediately.', 'payarc-payments'));
       }
     }
     return $items;
@@ -243,7 +253,7 @@ final class Unresolved {
         }
       }
       $items[] = $this->item('Gravity Forms', __('Form submission without an entry', 'payarc-payments'), admin_url('admin.php?page=gf_entries'), 'charge', $marker, $this->settings->mode(),
-        __('No entry was saved for this submission. If the transaction went through, find the payer in the PayArc console (orderid above) and either refund it or create the entry by hand.', 'payarc-payments'));
+        __('No entry was saved for this submission. If the charge went through, find it in the PayArc dashboard (reference above) and either refund it or create the entry by hand.', 'payarc-payments'));
     }
     return $items;
   }
@@ -264,7 +274,7 @@ final class Unresolved {
     if (!is_array($items)) {
       return [];
     }
-    return array_values(array_filter($items, static fn($item) => is_array($item) && !empty($item['key']) && !empty($item['orderid']) && isset($item['types'], $item['mode'])));
+    return array_values(array_filter($items, static fn($item) => is_array($item) && !empty($item['key']) && !empty($item['reference']) && isset($item['mode'])));
   }
 
   private function item(string $module, string $record, string $url, string $kind, array $marker, string $mode, string $hint): array {
@@ -277,7 +287,8 @@ final class Unresolved {
    * @param string $kind
    *   'charge' or 'refund'.
    * @param array $marker
-   *   The stored marker: orderid, sent_at, amount, exclude.
+   *   The stored marker: orderid, key (the idempotency key; the orderid when
+   *   absent), sent_at, amount, and for a refund charge_id and the snapshot.
    * @param string $hint
    *   What the administrator should do when the request went through.
    * @param string $account
@@ -286,18 +297,19 @@ final class Unresolved {
    */
   public static function makeItem(string $module, string $record, string $url, string $kind, array $marker, string $mode, string $hint, string $account = ''): array {
     $orderId = (string) $marker['orderid'];
+    $reference = (string) ($marker['key'] ?? '') !== '' ? (string) $marker['key'] : $orderId;
     $sentAt = (int) ($marker['sent_at'] ?? 0);
     return [
-      'key' => md5($module . '|' . $record . '|' . $kind . '|' . $orderId . '|' . $sentAt . '|' . $account),
+      'key' => md5($module . '|' . $record . '|' . $kind . '|' . $reference . '|' . $sentAt . '|' . $account),
       'module' => $module,
       'record' => $record,
       'url' => $url,
       'kind' => $kind,
       'orderid' => $orderId,
+      'reference' => $reference,
       'sent_at' => $sentAt,
       'amount' => isset($marker['amount']) && $marker['amount'] !== '' && $marker['amount'] !== NULL ? (string) $marker['amount'] : NULL,
-      'types' => $kind === 'refund' ? GatewayClient::TYPES_REFUND : GatewayClient::TYPES_CHARGE,
-      'exclude' => isset($marker['exclude']) && is_array($marker['exclude']) ? array_map('strval', $marker['exclude']) : [],
+      'marker' => $marker,
       'mode' => $mode,
       'account' => $account,
       'hint' => $hint,
