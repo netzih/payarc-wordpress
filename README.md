@@ -20,9 +20,11 @@ Status: all three modules pass their sandbox runs end to end (see
 
 ## Installation
 
-Build the zip with `bin/build-zip.sh`, then go to **Plugins > Add New Plugin >
-Upload Plugin**. The zip carries the bundled client, so the site needs no
-Composer. Requirements: WordPress 6.4+, PHP 8.1+ with curl and json, and at
+Download `payarc-payments-<version>.zip` from the
+[releases page](https://github.com/netzih/payarc-wordpress/releases) (or build
+it with `bin/build-zip.sh`, see [Development](#development)), then go to
+**Plugins > Add New Plugin > Upload Plugin**. The zip carries the bundled
+client, so the site needs no Composer. Requirements: WordPress 6.4+, PHP 8.1+ with curl and json, and at
 least one of Gravity Forms 2.9+, GiveWP 4 or WooCommerce 8 (WooCommerce
 Subscriptions for recurring WooCommerce payments).
 
